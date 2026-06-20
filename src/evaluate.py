@@ -1,13 +1,23 @@
 """
 Evaluation for the Transformer-Enhanced LSTM.
 
-Runs second on Colab, after train.py. Loads the saved model, test data, and
-training history -- it never re-trains. Produces the same six metrics,
-the same confusion-matrix / ROC / accuracy-loss-curve figures, and the
-same metrics.json schema as Phase 1, so Phase 3 can load both phases'
-metrics.json and tabulate them directly.
+Runs second on Colab, after train.py (for the same --task). Loads the
+saved model, validation/test data, and training history -- it never
+re-trains.
+
+Binary task: sweeps validation-set thresholds to find the F1-maximizing
+operating point (config.TUNE_THRESHOLD), then reports test-set metrics at
+both the default 0.5 threshold and the tuned threshold. This is how the
+model's higher AUC gets cashed in as a better, balanced operating point
+instead of being hidden behind a blind 0.5 cutoff.
+
+Application task: reports accuracy, macro/weighted F1, macro precision/
+recall, and macro one-vs-rest AUC, plus a per-class report and an 8x8
+confusion matrix. Macro-F1 and the confusion matrix are the headline
+metrics here given the ~10x class imbalance, not raw accuracy.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -36,118 +46,251 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 
-def main():
-    import tensorflow as tf
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate the Transformer-Enhanced LSTM.")
+    parser.add_argument(
+        "--task", choices=["binary", "application"], default=config.TASK,
+        help="Which classification task to evaluate (default: config.TASK).",
+    )
+    return parser.parse_args()
 
-    model = tf.keras.models.load_model(config.MODEL_PATH)
 
-    test_data = np.load(config.TEST_DATA_PATH)
-    X_test, y_test = test_data["X_test"], test_data["y_test"]
+def _binary_metrics(y_true, y_pred, y_prob):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    return {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred),
+        "recall": recall_score(y_true, y_pred),
+        "f1": f1_score(y_true, y_pred),
+        "auc": roc_auc_score(y_true, y_prob),
+        "specificity": tn / (tn + fp),
+    }
 
-    with open(config.HISTORY_PATH, "r") as f:
-        history = json.load(f)
 
-    y_prob = model.predict(X_test).ravel()
-    y_pred = (y_prob >= 0.5).astype(int)
+def _plot_curves(history, paths, model_name):
+    plt.figure(figsize=(6, 5))
+    plt.plot(history["accuracy"], label="train")
+    plt.plot(history["val_accuracy"], label="val")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title(f"Accuracy Curve -- {model_name}")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(paths.ACC_CURVE_PNG, dpi=150)
+    plt.close()
 
-    accuracy = accuracy_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
-    recall = recall_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-    auc = roc_auc_score(y_test, y_prob)
+    plt.figure(figsize=(6, 5))
+    plt.plot(history["loss"], label="train")
+    plt.plot(history["val_loss"], label="val")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title(f"Loss Curve -- {model_name}")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(paths.LOSS_CURVE_PNG, dpi=150)
+    plt.close()
 
-    tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
-    specificity = tn / (tn + fp)
 
-    print(f"Accuracy:    {accuracy:.4f}")
-    print(f"Precision:   {precision:.4f}")
-    print(f"Recall:      {recall:.4f}")
-    print(f"F1-score:    {f1:.4f}")
-    print(f"ROC-AUC:     {auc:.4f}")
-    print(f"Specificity: {specificity:.4f}")
+def evaluate_binary(model, data, history, paths):
+    X_val, y_val = data["X_val"], data["y_val"]
+    X_test, y_test = data["X_test"], data["y_test"]
 
-    # --- metrics.json (schema identical to Phase 1) ---
+    y_prob_val = model.predict(X_val).ravel()
+    y_prob_test = model.predict(X_test).ravel()
+
+    best_threshold = 0.5
+    if config.TUNE_THRESHOLD:
+        best_f1 = -1.0
+        for t in np.arange(1, 100) / 100.0:  # 0.01 .. 0.99, avoids float-arange drift
+            preds = (y_prob_val >= t).astype(int)
+            f1 = f1_score(y_val, preds, zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_threshold = round(float(t), 2)
+        print(f"Best threshold by validation F1: {best_threshold:.2f} (val F1={best_f1:.4f})")
+
+    y_pred_05 = (y_prob_test >= 0.5).astype(int)
+    y_pred_best = (y_prob_test >= best_threshold).astype(int)
+
+    metrics_05 = _binary_metrics(y_test, y_pred_05, y_prob_test)
+    metrics_best = _binary_metrics(y_test, y_pred_best, y_prob_test)
+
+    print("--- Threshold 0.50 ---")
+    for k, v in metrics_05.items():
+        print(f"  {k}: {v:.4f}")
+    print(f"--- Threshold {best_threshold:.2f} (tuned) ---")
+    for k, v in metrics_best.items():
+        print(f"  {k}: {v:.4f}")
+
+    # --- metrics.json ---
     metrics = {
         "model_name": config.MODEL_NAME,
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "auc": auc,
-        "specificity": specificity,
+        "task": "binary",
+        "threshold_0_5": metrics_05,
+        "best_threshold": best_threshold,
+        "threshold_tuned": metrics_best,
     }
-    with open(config.METRICS_JSON, "w") as f:
+    with open(paths.METRICS_JSON, "w") as f:
         json.dump(metrics, f, indent=2)
 
-    # --- metrics.txt (table mirroring the paper's Table 2) ---
-    header = f"{'Model':<30}{'Accuracy':>10}{'F1':>10}{'Recall':>10}{'Precision':>10}{'AUC':>10}{'Specificity':>12}"
-    row = (
-        f"{config.MODEL_NAME:<30}{accuracy:>10.4f}{f1:>10.4f}{recall:>10.4f}"
-        f"{precision:>10.4f}{auc:>10.4f}{specificity:>12.4f}"
+    # --- metrics.txt (two Table-2-style rows) ---
+    header = (
+        f"{'Model':<42}{'Accuracy':>10}{'F1':>10}{'Recall':>10}"
+        f"{'Precision':>10}{'AUC':>10}{'Specificity':>12}"
     )
-    with open(config.METRICS_TXT, "w") as f:
-        f.write(header + "\n")
-        f.write(row + "\n")
 
-    # --- classification report ---
-    report = classification_report(y_test, y_pred, target_names=config.CLASS_NAMES)
-    with open(config.CLF_REPORT_TXT, "w") as f:
+    def _row(name, m):
+        return (
+            f"{name:<42}{m['accuracy']:>10.4f}{m['f1']:>10.4f}{m['recall']:>10.4f}"
+            f"{m['precision']:>10.4f}{m['auc']:>10.4f}{m['specificity']:>12.4f}"
+        )
+
+    with open(paths.METRICS_TXT, "w") as f:
+        f.write(header + "\n")
+        f.write(_row(f"{config.MODEL_NAME} (thr=0.50)", metrics_05) + "\n")
+        f.write(_row(f"{config.MODEL_NAME} (thr=best={best_threshold:.2f})", metrics_best) + "\n")
+
+    # --- classification report (at the tuned threshold, the recommended operating point) ---
+    report = classification_report(y_test, y_pred_best, target_names=config.CLASS_NAMES)
+    with open(paths.CLF_REPORT_TXT, "w") as f:
+        f.write(f"Classification report at tuned threshold ({best_threshold:.2f})\n\n")
         f.write(report)
 
-    # --- confusion matrix ---
-    cm = confusion_matrix(y_test, y_pred)
+    # --- confusion matrix at the tuned threshold ---
+    cm = confusion_matrix(y_test, y_pred_best)
     plt.figure(figsize=(6, 5))
     sns.heatmap(
-        cm,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        xticklabels=config.CLASS_NAMES,
-        yticklabels=config.CLASS_NAMES,
+        cm, annot=True, fmt="d", cmap="Blues",
+        xticklabels=config.CLASS_NAMES, yticklabels=config.CLASS_NAMES,
     )
     plt.xlabel("Predicted")
     plt.ylabel("True")
-    plt.title(f"Confusion Matrix -- {config.MODEL_NAME}")
+    plt.title(f"Confusion Matrix -- {config.MODEL_NAME} (thr={best_threshold:.2f})")
     plt.tight_layout()
-    plt.savefig(config.CONFUSION_PNG, dpi=150)
+    plt.savefig(paths.CONFUSION_PNG, dpi=150)
     plt.close()
 
-    # --- ROC curve ---
-    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    # --- ROC curve (threshold-independent) ---
+    fpr, tpr, _ = roc_curve(y_test, y_prob_test)
     plt.figure(figsize=(6, 5))
-    plt.plot(fpr, tpr, label=f"AUC = {auc:.4f}")
+    plt.plot(fpr, tpr, label=f"AUC = {metrics_best['auc']:.4f}")
     plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
     plt.title(f"ROC Curve -- {config.MODEL_NAME}")
     plt.legend(loc="lower right")
     plt.tight_layout()
-    plt.savefig(config.ROC_CURVE_PNG, dpi=150)
+    plt.savefig(paths.ROC_CURVE_PNG, dpi=150)
     plt.close()
 
-    # --- accuracy curve ---
-    plt.figure(figsize=(6, 5))
-    plt.plot(history["accuracy"], label="train")
-    plt.plot(history["val_accuracy"], label="val")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-    plt.title(f"Accuracy Curve -- {config.MODEL_NAME}")
-    plt.legend()
+    _plot_curves(history, paths, config.MODEL_NAME)
+
+
+def evaluate_application(model, data, history, paths):
+    X_test, y_test = data["X_test"], data["y_test"]
+    class_names = data["class_names"]
+
+    y_prob = model.predict(X_test)
+    y_pred = np.argmax(y_prob, axis=1)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    macro_f1 = f1_score(y_test, y_pred, average="macro")
+    weighted_f1 = f1_score(y_test, y_pred, average="weighted")
+    macro_precision = precision_score(y_test, y_pred, average="macro", zero_division=0)
+    macro_recall = recall_score(y_test, y_pred, average="macro", zero_division=0)
+    macro_auc = roc_auc_score(y_test, y_prob, multi_class="ovr", average="macro")
+
+    print(f"Accuracy:        {accuracy:.4f}")
+    print(f"Macro F1:        {macro_f1:.4f}")
+    print(f"Weighted F1:     {weighted_f1:.4f}")
+    print(f"Macro Precision: {macro_precision:.4f}")
+    print(f"Macro Recall:    {macro_recall:.4f}")
+    print(f"Macro AUC (OvR): {macro_auc:.4f}")
+
+    # --- metrics.json ---
+    metrics = {
+        "model_name": config.MODEL_NAME,
+        "task": "application",
+        "accuracy": accuracy,
+        "macro_f1": macro_f1,
+        "weighted_f1": weighted_f1,
+        "macro_precision": macro_precision,
+        "macro_recall": macro_recall,
+        "macro_auc": macro_auc,
+    }
+    with open(paths.METRICS_JSON, "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    # --- per-class report ---
+    report = classification_report(y_test, y_pred, target_names=class_names)
+    with open(paths.CLF_REPORT_TXT, "w") as f:
+        f.write(report)
+
+    # --- metrics.txt (readable summary + per-class report) ---
+    with open(paths.METRICS_TXT, "w") as f:
+        f.write(f"{config.MODEL_NAME} -- application-type classification (8 classes)\n\n")
+        f.write(f"Accuracy:        {accuracy:.4f}\n")
+        f.write(f"Macro F1:        {macro_f1:.4f}\n")
+        f.write(f"Weighted F1:     {weighted_f1:.4f}\n")
+        f.write(f"Macro Precision: {macro_precision:.4f}\n")
+        f.write(f"Macro Recall:    {macro_recall:.4f}\n")
+        f.write(f"Macro AUC (OvR): {macro_auc:.4f}\n\n")
+        f.write(report)
+
+    # --- 8x8 confusion matrix (raw counts) ---
+    cm = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(9, 7))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title(f"Confusion Matrix -- {config.MODEL_NAME} (application)")
+    plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
-    plt.savefig(config.ACC_CURVE_PNG, dpi=150)
+    plt.savefig(paths.CONFUSION_PNG, dpi=150)
     plt.close()
 
-    # --- loss curve ---
-    plt.figure(figsize=(6, 5))
-    plt.plot(history["loss"], label="train")
-    plt.plot(history["val_loss"], label="val")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title(f"Loss Curve -- {config.MODEL_NAME}")
-    plt.legend()
+    # --- row-normalized version so small classes (VOIP, Email) are readable ---
+    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+    norm_png = paths.CONFUSION_PNG.replace(".png", "_normalized.png")
+    plt.figure(figsize=(9, 7))
+    sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title(f"Confusion Matrix (row-normalized) -- {config.MODEL_NAME} (application)")
+    plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
-    plt.savefig(config.LOSS_CURVE_PNG, dpi=150)
+    plt.savefig(norm_png, dpi=150)
     plt.close()
+
+    _plot_curves(history, paths, config.MODEL_NAME)
+
+
+def main():
+    args = parse_args()
+    task = args.task
+    paths = config.get_paths(task)
+
+    import tensorflow as tf
+
+    model = tf.keras.models.load_model(paths.MODEL_PATH)
+
+    splits = np.load(paths.DATA_SPLITS_PATH)
+    data = {
+        "X_val": splits["X_val"],
+        "y_val": splits["y_val"],
+        "X_test": splits["X_test"],
+        "y_test": splits["y_test"],
+    }
+
+    with open(paths.HISTORY_PATH, "r") as f:
+        history = json.load(f)
+
+    if task == "binary":
+        evaluate_binary(model, data, history, paths)
+    else:
+        with open(paths.CLASS_NAMES_JSON, "r") as f:
+            data["class_names"] = json.load(f)
+        evaluate_application(model, data, history, paths)
 
 
 if __name__ == "__main__":

@@ -2,30 +2,32 @@
 Training orchestration for the Transformer-Enhanced LSTM.
 
 This script is meant to run on Google Colab (GPU), not on a local machine.
-It loads and prepares the data, builds the model, fits it, and persists
-everything evaluate.py needs. It contains no evaluation logic.
+It loads and prepares the data for the chosen --task, builds the model,
+fits it, and persists everything evaluate.py needs. It contains no
+evaluation logic.
 
 --------------------------------------------------------------------------
-Fair-Comparison Note
+Fair-Comparison Note (binary task)
 --------------------------------------------------------------------------
-This phase ships with imbalance-aware training defaults
-(USE_CLASS_WEIGHT=True, EPOCHS=50) to get the strongest result from the
-proposed model. Two valid ways to report the comparison vs. the Phase 1
-baseline:
+Earlier defaults trained the binary model with USE_CLASS_WEIGHT=True,
+which won on F1/AUC/recall but lost on precision/accuracy against the
+Phase 1 baseline (which trained without class weights) -- not an
+apples-to-apples comparison. The default is now MATCHED to the baseline:
+USE_CLASS_WEIGHT=False. The model's higher AUC is instead cashed in via
+validation-set threshold tuning in evaluate.py (config.TUNE_THRESHOLD):
+the decision threshold is chosen to maximize F1 on the validation set,
+then applied to the test set. evaluate.py reports metrics at both the
+default 0.5 threshold and the tuned threshold, so neither number is
+hidden.
 
-1. Best-model comparison (default): report the proposed model at these
-   settings. Describe it honestly as "Transformer-Enhanced LSTM with
-   class-weighted training." This is what most papers report.
-2. Architecture-only ablation: to isolate the contribution of the
-   architecture alone, set USE_CLASS_WEIGHT=False and EPOCHS=30 to match
-   Phase 1 exactly -- then the only difference between the two models is
-   model.py.
-
-Whichever you choose, state it clearly in the report. Do not silently mix
-settings.
+To experiment with class-weighted training instead (a separate, valid
+choice, not a substitute for threshold tuning), set USE_CLASS_WEIGHT=True
+in config.py and describe the run accordingly in the report. Do not
+silently mix settings.
 --------------------------------------------------------------------------
 """
 
+import argparse
 import json
 import os
 import random
@@ -53,17 +55,32 @@ def set_seeds(seed: int) -> None:
         tf.random.set_seed(seed)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train the Transformer-Enhanced LSTM.")
+    parser.add_argument(
+        "--task", choices=["binary", "application"], default=config.TASK,
+        help="Which classification task to train (default: config.TASK).",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    task = args.task
+    paths = config.get_paths(task)
+
     import tensorflow as tf
     from sklearn.utils.class_weight import compute_class_weight
 
     set_seeds(config.RANDOM_STATE)
 
-    os.makedirs(config.RESULTS_DIR, exist_ok=True)
-    os.makedirs(config.FIGURES_DIR, exist_ok=True)
+    os.makedirs(paths.RESULTS_DIR, exist_ok=True)
+    os.makedirs(paths.FIGURES_DIR, exist_ok=True)
 
-    data = load_and_prepare(config)
-    model = build_transformer_lstm(n_features=data["n_features"])
+    data = load_and_prepare(config, task=task)
+    model = build_transformer_lstm(
+        n_features=data["n_features"], n_classes=data["n_classes"], task=task
+    )
     model.summary()
 
     callbacks = [
@@ -79,8 +96,9 @@ def main():
         ),
     ]
 
+    use_class_weight = config.USE_CLASS_WEIGHT if task == "binary" else config.APP_USE_CLASS_WEIGHT
     class_weight = None
-    if config.USE_CLASS_WEIGHT:
+    if use_class_weight:
         weights = compute_class_weight(
             "balanced", classes=np.unique(data["y_train"]), y=data["y_train"]
         )
@@ -97,18 +115,24 @@ def main():
         class_weight=class_weight,
     )
 
-    model.save(config.MODEL_PATH)
+    model.save(paths.MODEL_PATH)
 
-    with open(config.HISTORY_PATH, "w") as f:
+    with open(paths.HISTORY_PATH, "w") as f:
         json.dump(history.history, f)
 
+    # Both validation and test arrays are persisted: validation is needed by
+    # evaluate.py for threshold tuning (binary task), test is the held-out
+    # set the metrics are ultimately reported on.
     np.savez_compressed(
-        config.TEST_DATA_PATH,
+        paths.DATA_SPLITS_PATH,
+        X_val=data["X_val"],
+        y_val=data["y_val"],
         X_test=data["X_test"],
         y_test=data["y_test"],
     )
 
     final_epoch = len(history.history["loss"]) - 1
+    print(f"Task: {task}")
     print(f"Final epoch: {final_epoch + 1}")
     for key, values in history.history.items():
         print(f"  {key}: {values[final_epoch]:.4f}")

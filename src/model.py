@@ -1,16 +1,20 @@
 """
-Transformer-Enhanced LSTM for binary Darknet-vs-Benign classification.
+Transformer-Enhanced LSTM, shared between two tasks:
+
+- "binary": Darknet vs Benign (sigmoid head, binary_crossentropy / focal).
+- "application": 8-class application type from Label.1 (softmax head,
+  sparse_categorical_crossentropy).
 
 This model evolves the Phase 1 CNN-LSTM baseline rather than replacing it.
 It keeps the CNN front-end (local feature extraction) and an LSTM
-(sequential modeling), then -- instead of compressing the sequence with a
-second LSTM -- inserts a Transformer encoder block that applies multi-head
-self-attention across all positions of the LSTM's output sequence. This
-lets the model weigh long-range relationships between flow features and
-focus on the most informative parts of the representation, before a
-global-pooling + dense head produces the binary decision. As in the
-baseline, there is no Embedding layer (input is tabular continuous
-features) and the LSTM is a standard Keras LSTM.
+(sequential modeling, optionally Bidirectional), then -- instead of
+compressing the sequence with a second LSTM -- stacks Transformer encoder
+blocks that apply multi-head self-attention across all positions of the
+LSTM's output sequence. This lets the model weigh long-range relationships
+between flow features and focus on the most informative parts of the
+representation, before a global-pooling + dense head produces the
+decision. As in the baseline, there is no Embedding layer (input is
+tabular continuous features) and the LSTM is a standard Keras LSTM.
 
 Built with the Keras Functional API (required for the transformer block's
 residual connections). This module never fits a model -- it only builds
@@ -43,7 +47,7 @@ def transformer_encoder(inputs, num_heads, key_dim, ff_dim, dropout):
 
     # --- Position-wise Feed-Forward sublayer (residual + LayerNorm) ---
     ff = layers.Dense(ff_dim, activation="relu")(x)
-    ff = layers.Dense(inputs.shape[-1])(ff)  # project back to embed_dim
+    ff = layers.Dense(inputs.shape[-1])(ff)  # project back to embed_dim (adapts to BiLSTM's doubled width too)
     ff = layers.Dropout(dropout)(ff)
     out = layers.LayerNormalization(epsilon=1e-6)(x + ff)  # residual add + norm
     return out
@@ -70,8 +74,17 @@ class LearnablePositionalEncoding(layers.Layer):
         return inputs + self.pos_embedding
 
 
-def build_transformer_lstm(n_features: int, n_channels: int = 1) -> tf.keras.Model:
-    """Build and compile the Transformer-Enhanced LSTM. Does not fit the model."""
+def build_transformer_lstm(
+    n_features: int, n_classes: int, task: str, n_channels: int = 1
+) -> tf.keras.Model:
+    """Build and compile the Transformer-Enhanced LSTM for `task`. Does not fit the model.
+
+    task == "binary": n_classes is ignored for the head (single sigmoid unit).
+    task == "application": n_classes sets the softmax head's width.
+    """
+    if task not in ("binary", "application"):
+        raise ValueError(f"Unknown task: {task!r}")
+
     inputs = Input(shape=(n_features, n_channels))
 
     x = layers.Conv1D(
@@ -85,7 +98,10 @@ def build_transformer_lstm(n_features: int, n_channels: int = 1) -> tf.keras.Mod
     )(x)
     x = layers.MaxPooling1D(pool_size=config.POOL_SIZE)(x)
 
-    x = layers.LSTM(config.LSTM_UNITS, return_sequences=True)(x)
+    lstm_layer = layers.LSTM(config.LSTM_UNITS, return_sequences=True)
+    if config.USE_BILSTM:
+        lstm_layer = layers.Bidirectional(lstm_layer)  # doubles the channel dim (e.g. 100 -> 200)
+    x = lstm_layer(x)
     x = layers.Dropout(config.DROPOUT_RATE)(x)
 
     if config.USE_POSITIONAL_ENCODING:
@@ -103,29 +119,30 @@ def build_transformer_lstm(n_features: int, n_channels: int = 1) -> tf.keras.Mod
     x = layers.GlobalAveragePooling1D()(x)
     x = layers.Dense(config.DENSE_HEAD_UNITS, activation="relu")(x)
     x = layers.Dropout(config.DROPOUT_RATE)(x)
-    outputs = layers.Dense(1, activation="sigmoid")(x)
 
-    model = Model(inputs=inputs, outputs=outputs, name="transformer_enhanced_lstm")
-
-    if config.LOSS_FN == "focal":
-        loss = BinaryFocalCrossentropy()
-    else:
-        loss = "binary_crossentropy"
-
-    model.compile(
-        optimizer=Adam(),
-        loss=loss,
-        metrics=[
+    if task == "binary":
+        outputs = layers.Dense(1, activation="sigmoid")(x)
+        loss = BinaryFocalCrossentropy() if config.LOSS_FN == "focal" else "binary_crossentropy"
+        metrics = [
             "accuracy",
             Precision(name="precision"),
             Recall(name="recall"),
             AUC(name="auc"),
-        ],
-    )
+        ]
+    else:  # application
+        outputs = layers.Dense(n_classes, activation="softmax")(x)
+        loss = "sparse_categorical_crossentropy"
+        # Multiclass precision/recall/AUC are computed in evaluate.py via sklearn instead.
+        metrics = ["accuracy"]
+
+    model = Model(inputs=inputs, outputs=outputs, name=f"transformer_enhanced_lstm_{task}")
+    model.compile(optimizer=Adam(), loss=loss, metrics=metrics)
     return model
 
 
 if __name__ == "__main__":
-    # Shape self-verification only -- builds and prints summary, never fits.
-    demo_model = build_transformer_lstm(n_features=62)
-    demo_model.summary()
+    # Shape self-verification only -- builds and prints summaries, never fits.
+    print("=== binary head ===")
+    build_transformer_lstm(n_features=62, n_classes=2, task="binary").summary()
+    print("\n=== application head ===")
+    build_transformer_lstm(n_features=62, n_classes=8, task="application").summary()

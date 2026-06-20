@@ -58,7 +58,7 @@ def set_seeds(seed: int) -> None:
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the Transformer-Enhanced LSTM.")
     parser.add_argument(
-        "--task", choices=["binary", "application"], default=config.TASK,
+        "--task", choices=["binary", "application", "fourclass"], default=config.TASK,
         help="Which classification task to train (default: config.TASK).",
     )
     return parser.parse_args()
@@ -96,7 +96,7 @@ def main():
         ),
     ]
 
-    use_class_weight = config.USE_CLASS_WEIGHT if task == "binary" else config.APP_USE_CLASS_WEIGHT
+    use_class_weight = config.CLASS_WEIGHT_BY_TASK[task]
     class_weight = None
     if use_class_weight:
         weights = compute_class_weight(

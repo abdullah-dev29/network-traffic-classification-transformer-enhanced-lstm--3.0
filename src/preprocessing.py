@@ -1,5 +1,5 @@
 """
-Preprocessing pipeline for CIC-Darknet2020, supporting two tasks:
+Preprocessing pipeline for CIC-Darknet2020, supporting three tasks:
 
 - "binary": Darknet vs Benign from `Label`. Logically IDENTICAL to the
   original Phase 1 baseline pipeline -- same label mapping, same
@@ -9,8 +9,11 @@ Preprocessing pipeline for CIC-Darknet2020, supporting two tasks:
   for a fair Phase 3 comparison.
 - "application": 8-class application type from `Label.1`, after collapsing
   casing variants to canonical names (config.APP_LABEL_CANON).
+- "fourclass": the 4 classes underlying the binary grouping (Tor, VPN,
+  Non-Tor, NonVPN) from `Label`. evaluate.py reports this hierarchically --
+  the 4-class result, plus a binary view obtained by grouping it.
 
-Both tasks share identical cleaning / constant-column-drop / scaling /
+All three tasks share identical cleaning / constant-column-drop / scaling /
 reshape / split mechanics -- they only differ in how the target `y` (and
 which label columns get dropped from `X`) is constructed.
 
@@ -69,20 +72,33 @@ def _build_application_target(df: pd.DataFrame, config):
     return y, X, class_names
 
 
+def _build_fourclass_target(df: pd.DataFrame, config):
+    """4-class Tor/VPN/Non-Tor/NonVPN from `Label`. No casing issues, unlike Label.1."""
+    encoder = LabelEncoder()
+    y = pd.Series(
+        encoder.fit_transform(df[config.FOURCLASS_LABEL_COL]), index=df.index
+    )
+    class_names = encoder.classes_.tolist()
+
+    drop_cols = [config.LABEL_COL, config.APP_LABEL_COL]
+    X = df.drop(columns=drop_cols)
+    return y, X, class_names
+
+
 def load_and_prepare(config, task: str = None) -> dict:
     """Load the parquet, build the target for `task`, clean, split, and scale.
 
-    `task` defaults to config.TASK ("binary" or "application").
+    `task` defaults to config.TASK ("binary", "application", or "fourclass").
 
     Returns a dict with X_train, y_train, X_val, y_val, X_test, y_test
     (each X reshaped to (n_samples, n_features, 1)), plus n_features,
-    n_classes, feature_names, dropped_cols, and (application only)
-    class_names. The application branch also persists class_names.json
-    under the task's results dir so evaluate.py uses a consistent order.
+    n_classes, feature_names, dropped_cols, and (application/fourclass only)
+    class_names. Those two branches also persist class_names.json under
+    the task's results dir so evaluate.py uses a consistent order.
     """
     if task is None:
         task = config.TASK
-    if task not in ("binary", "application"):
+    if task not in ("binary", "application", "fourclass"):
         raise ValueError(f"Unknown task: {task!r}")
 
     paths = config.get_paths(task)
@@ -94,8 +110,10 @@ def load_and_prepare(config, task: str = None) -> dict:
     # 2. Build target + drop label columns from X (task-specific)
     if task == "binary":
         y, X, class_names = _build_binary_target(df, config)
-    else:
+    elif task == "application":
         y, X, class_names = _build_application_target(df, config)
+    else:  # fourclass
+        y, X, class_names = _build_fourclass_target(df, config)
     n_classes = len(class_names)
 
     # 3. Defensive cleaning (expect ~0 changes on this pre-cleaned dataset)
@@ -171,11 +189,12 @@ def load_and_prepare(config, task: str = None) -> dict:
         "dropped_cols": dropped_cols,
     }
 
-    if task == "application":
+    if task in ("application", "fourclass"):
         result["class_names"] = class_names
         with open(paths.CLASS_NAMES_JSON, "w") as f:
             json.dump(class_names, f)
-        print(f"Application class names ({len(class_names)}): {class_names}")
+        label = "Application" if task == "application" else "Fourclass"
+        print(f"{label} class names ({len(class_names)}): {class_names}")
 
     return result
 

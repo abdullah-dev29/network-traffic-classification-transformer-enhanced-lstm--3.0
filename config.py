@@ -3,9 +3,11 @@ Single source of truth for paths, hyperparameters, and toggles.
 
 Split / label configuration for the binary task is IDENTICAL to the Phase 1
 CNN-LSTM baseline so that Phase 3 can compare the two models on the exact
-same held-out test rows. This model now also supports a second task --
-application-type classification (8 classes from Label.1) -- selected via
-TASK or the --task CLI flag in train.py / evaluate.py.
+same held-out test rows. This model also supports application-type
+classification (8 classes from Label.1) and a hierarchical 4-class task
+(Tor/VPN/Non-Tor/NonVPN from Label, reported at both the 4-class and the
+grouped-binary level) -- selected via TASK or the --task CLI flag in
+train.py / evaluate.py.
 
 Output paths are resolved per task via get_paths(task), not as flat module
 constants, because the task can be overridden at the CLI after this module
@@ -19,7 +21,7 @@ from types import SimpleNamespace
 # --------------------------------------------------------------------------
 # Task switch
 # --------------------------------------------------------------------------
-TASK = "binary"  # "binary" | "application". CLI --task overrides this.
+TASK = "binary"  # "binary" | "application" | "fourclass". CLI --task overrides this.
 
 # --------------------------------------------------------------------------
 # Paths
@@ -84,6 +86,15 @@ APP_LABEL_CANON = {
 # derives it (sorted unique, post-normalization) and persists it to
 # class_names.json so evaluate.py uses a consistent class order.
 
+# Fourclass task -- the 4 underlying classes behind the binary grouping
+# (Label has no casing issues, unlike Label.1, so no normalization map is
+# needed). Same column as LABEL_COL; named separately for clarity in the
+# fourclass code path.
+FOURCLASS_LABEL_COL = "Label"
+# FOURCLASS_NAMES is intentionally not hardcoded here, same reasoning as
+# APP_CLASS_NAMES -- preprocessing.py LabelEncodes Label (sorted unique:
+# Non-Tor, NonVPN, Tor, VPN) and persists the order to class_names.json.
+
 # --------------------------------------------------------------------------
 # Split / reproducibility — IDENTICAL to Phase 1 (do not change)
 # --------------------------------------------------------------------------
@@ -113,8 +124,23 @@ USE_CLASS_WEIGHT = False
 # sklearn compute_class_weight("balanced", ...) in train.py.
 APP_USE_CLASS_WEIGHT = True
 
+# Fourclass: Tor is ~1.1% of rows (~55x imbalance vs Non-Tor) -- class
+# weights are enabled by default here too. Computed for all 4 classes via
+# sklearn compute_class_weight("balanced", ...) in train.py.
+FOURCLASS_USE_CLASS_WEIGHT = True
+
+# Single lookup train.py reads to resolve the active task's class-weight
+# setting, instead of an if/elif chain. Binary and application still come
+# from their own flags above (unchanged); only the fourclass entry is new.
+CLASS_WEIGHT_BY_TASK = {
+    "binary": USE_CLASS_WEIGHT,
+    "application": APP_USE_CLASS_WEIGHT,
+    "fourclass": FOURCLASS_USE_CLASS_WEIGHT,
+}
+
 # Binary only: sweep thresholds on the validation set and pick the one that
 # maximizes F1, instead of blindly using 0.5. evaluate.py reports both.
+# Fourclass uses argmax (no threshold), same as application.
 TUNE_THRESHOLD = True
 
 # "bce" = binary_crossentropy (default, binary task only).

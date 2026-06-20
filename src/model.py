@@ -1,9 +1,12 @@
 """
-Transformer-Enhanced LSTM, shared between two tasks:
+Transformer-Enhanced LSTM, shared between three tasks:
 
 - "binary": Darknet vs Benign (sigmoid head, binary_crossentropy / focal).
 - "application": 8-class application type from Label.1 (softmax head,
   sparse_categorical_crossentropy).
+- "fourclass": 4-class Tor/VPN/Non-Tor/NonVPN from Label (softmax head,
+  sparse_categorical_crossentropy -- same multiclass head as "application",
+  just a different n_classes).
 
 This model evolves the Phase 1 CNN-LSTM baseline rather than replacing it.
 It keeps the CNN front-end (local feature extraction) and an LSTM
@@ -80,9 +83,10 @@ def build_transformer_lstm(
     """Build and compile the Transformer-Enhanced LSTM for `task`. Does not fit the model.
 
     task == "binary": n_classes is ignored for the head (single sigmoid unit).
-    task == "application": n_classes sets the softmax head's width.
+    task in ("application", "fourclass"): n_classes sets the softmax head's
+    width (8 or 4 respectively) -- both use the same multiclass head.
     """
-    if task not in ("binary", "application"):
+    if task not in ("binary", "application", "fourclass"):
         raise ValueError(f"Unknown task: {task!r}")
 
     inputs = Input(shape=(n_features, n_channels))
@@ -129,7 +133,7 @@ def build_transformer_lstm(
             Recall(name="recall"),
             AUC(name="auc"),
         ]
-    else:  # application
+    else:  # application or fourclass -- both use the multiclass head
         outputs = layers.Dense(n_classes, activation="softmax")(x)
         loss = "sparse_categorical_crossentropy"
         # Multiclass precision/recall/AUC are computed in evaluate.py via sklearn instead.
@@ -146,3 +150,5 @@ if __name__ == "__main__":
     build_transformer_lstm(n_features=62, n_classes=2, task="binary").summary()
     print("\n=== application head ===")
     build_transformer_lstm(n_features=62, n_classes=8, task="application").summary()
+    print("\n=== fourclass head ===")
+    build_transformer_lstm(n_features=62, n_classes=4, task="fourclass").summary()

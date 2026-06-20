@@ -15,6 +15,14 @@ Application task: reports accuracy, macro/weighted F1, macro precision/
 recall, and macro one-vs-rest AUC, plus a per-class report and an 8x8
 confusion matrix. Macro-F1 and the confusion matrix are the headline
 metrics here given the ~10x class imbalance, not raw accuracy.
+
+Fourclass task: trains one 4-class (Tor/VPN/Non-Tor/NonVPN) softmax
+classifier, then reports TWO levels -- Level 2 is the 4-class result
+(same kind of macro metrics as application), Level 1 is the binary
+Darknet-vs-Benign view obtained by grouping the 4-class prediction (and
+summing the Tor+VPN probability mass for AUC). Tor is ~1.1% of rows
+(~55x imbalance), so it is expected to be the weak class -- macro-F1 and
+the confusion matrix are the headline Level-2 metrics, not raw accuracy.
 """
 
 import argparse
@@ -49,7 +57,7 @@ import config
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate the Transformer-Enhanced LSTM.")
     parser.add_argument(
-        "--task", choices=["binary", "application"], default=config.TASK,
+        "--task", choices=["binary", "application", "fourclass"], default=config.TASK,
         help="Which classification task to evaluate (default: config.TASK).",
     )
     return parser.parse_args()
@@ -265,6 +273,124 @@ def evaluate_application(model, data, history, paths):
     _plot_curves(history, paths, config.MODEL_NAME)
 
 
+def evaluate_fourclass(model, data, history, paths):
+    """Two-level reporting: Level 2 (4-class, fine) plus Level 1 (binary, grouped from it)."""
+    X_test, y_test = data["X_test"], data["y_test"]
+    class_names = data["class_names"]
+
+    y_prob = model.predict(X_test)
+    y_pred = np.argmax(y_prob, axis=1)
+
+    # --- Level 2: 4-class (fine) ---
+    accuracy = accuracy_score(y_test, y_pred)
+    macro_f1 = f1_score(y_test, y_pred, average="macro")
+    weighted_f1 = f1_score(y_test, y_pred, average="weighted")
+    macro_precision = precision_score(y_test, y_pred, average="macro", zero_division=0)
+    macro_recall = recall_score(y_test, y_pred, average="macro", zero_division=0)
+    macro_auc = roc_auc_score(y_test, y_prob, multi_class="ovr", average="macro")
+
+    level2 = {
+        "accuracy": accuracy,
+        "macro_f1": macro_f1,
+        "weighted_f1": weighted_f1,
+        "macro_precision": macro_precision,
+        "macro_recall": macro_recall,
+        "macro_auc": macro_auc,
+    }
+
+    # --- Level 1: binary (coarse), derived by grouping the 4-class prediction ---
+    idx_to_binary = np.array([1 if name in config.DARKNET_CLASSES else 0 for name in class_names])
+    y_test_binary = idx_to_binary[y_test]
+    y_pred_binary = idx_to_binary[y_pred]
+    darknet_idx = [i for i, name in enumerate(class_names) if name in config.DARKNET_CLASSES]
+    p_darknet = y_prob[:, darknet_idx].sum(axis=1)  # P(Tor) + P(VPN), for binary AUC
+
+    level1 = _binary_metrics(y_test_binary, y_pred_binary, p_darknet)
+
+    print("--- Level 1: binary (grouped from 4-class prediction) ---")
+    for k, v in level1.items():
+        print(f"  {k}: {v:.4f}")
+    print("--- Level 2: 4-class ---")
+    for k, v in level2.items():
+        print(f"  {k}: {v:.4f}")
+
+    # --- metrics.json ---
+    metrics = {
+        "model_name": config.MODEL_NAME,
+        "task": "fourclass",
+        "level1_binary": level1,
+        "level2_fourclass": level2,
+    }
+    with open(paths.METRICS_JSON, "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    # --- per-class report (Level 2) ---
+    report = classification_report(y_test, y_pred, target_names=class_names)
+    with open(paths.CLF_REPORT_TXT, "w") as f:
+        f.write(report)
+
+    # --- metrics.txt: Level-1 table row, then Level-2 summary + per-class report ---
+    header = (
+        f"{'Model':<42}{'Accuracy':>10}{'F1':>10}{'Recall':>10}"
+        f"{'Precision':>10}{'AUC':>10}{'Specificity':>12}"
+    )
+    row = (
+        f"{config.MODEL_NAME + ' (Level 1: binary, grouped)':<42}{level1['accuracy']:>10.4f}"
+        f"{level1['f1']:>10.4f}{level1['recall']:>10.4f}{level1['precision']:>10.4f}"
+        f"{level1['auc']:>10.4f}{level1['specificity']:>12.4f}"
+    )
+    with open(paths.METRICS_TXT, "w") as f:
+        f.write("Level 1 -- Binary (Darknet vs Benign), grouped from the 4-class prediction\n")
+        f.write(header + "\n")
+        f.write(row + "\n\n")
+        f.write("Level 2 -- 4-class (Tor, VPN, Non-Tor, NonVPN)\n\n")
+        f.write(f"Accuracy:        {accuracy:.4f}\n")
+        f.write(f"Macro F1:        {macro_f1:.4f}\n")
+        f.write(f"Weighted F1:     {weighted_f1:.4f}\n")
+        f.write(f"Macro Precision: {macro_precision:.4f}\n")
+        f.write(f"Macro Recall:    {macro_recall:.4f}\n")
+        f.write(f"Macro AUC (OvR): {macro_auc:.4f}\n\n")
+        f.write(report)
+
+    # --- 2x2 confusion matrix (Level 1, binary) ---
+    cm_binary = confusion_matrix(y_test_binary, y_pred_binary)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(
+        cm_binary, annot=True, fmt="d", cmap="Blues",
+        xticklabels=config.CLASS_NAMES, yticklabels=config.CLASS_NAMES,
+    )
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title(f"Confusion Matrix -- {config.MODEL_NAME} (Level 1: binary, grouped)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(paths.FIGURES_DIR, "confusion_matrix_binary.png"), dpi=150)
+    plt.close()
+
+    # --- 4x4 confusion matrix (Level 2, raw counts) ---
+    cm4 = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(7, 6))
+    sns.heatmap(cm4, annot=True, fmt="d", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title(f"Confusion Matrix -- {config.MODEL_NAME} (Level 2: 4-class)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(paths.FIGURES_DIR, "confusion_matrix_4class.png"), dpi=150)
+    plt.close()
+
+    # --- 4x4 confusion matrix, row-normalized so rare Tor is readable ---
+    cm4_norm = cm4.astype(float) / cm4.sum(axis=1, keepdims=True)
+    plt.figure(figsize=(7, 6))
+    sns.heatmap(cm4_norm, annot=True, fmt=".2f", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title(f"Confusion Matrix (row-normalized) -- {config.MODEL_NAME} (Level 2: 4-class)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(paths.FIGURES_DIR, "confusion_matrix_4class_normalized.png"), dpi=150)
+    plt.close()
+
+    _plot_curves(history, paths, config.MODEL_NAME)
+
+
 def main():
     args = parse_args()
     task = args.task
@@ -287,10 +413,14 @@ def main():
 
     if task == "binary":
         evaluate_binary(model, data, history, paths)
-    else:
+    elif task == "application":
         with open(paths.CLASS_NAMES_JSON, "r") as f:
             data["class_names"] = json.load(f)
         evaluate_application(model, data, history, paths)
+    else:  # fourclass
+        with open(paths.CLASS_NAMES_JSON, "r") as f:
+            data["class_names"] = json.load(f)
+        evaluate_fourclass(model, data, history, paths)
 
 
 if __name__ == "__main__":

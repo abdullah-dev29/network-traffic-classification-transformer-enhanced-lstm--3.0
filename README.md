@@ -6,7 +6,7 @@ on the CIC-Darknet2020 dataset. The model is an evolution of the Phase 1
 baseline -- it keeps the CNN front-end and LSTM, then adds Transformer encoder
 blocks (multi-head self-attention) before the classification head.
 
-The model supports **two tasks**, selected with `--task`:
+The model supports **three tasks**, selected with `--task`:
 
 - **`binary`** -- Darknet vs Benign traffic, from the `Label` column. Phase 3
   will compare this against the Phase 1 baseline on the exact same held-out
@@ -14,6 +14,10 @@ The model supports **two tasks**, selected with `--task`:
 - **`application`** -- 8-class application type (e.g. Browsing, P2P,
   Video-Streaming), from the `Label.1` column. This is a separate,
   additional task with no Phase 1 equivalent to compare against.
+- **`fourclass`** -- a hierarchical extension of Task 1: trains one 4-class
+  classifier on the same `Label` column (Tor, VPN, Non-Tor, NonVPN) and
+  reports results at two levels, binary (grouped) and 4-class. See
+  "Task 1 extension" below.
 
 ## Dataset
 
@@ -138,6 +142,35 @@ in `config.py` and describe the run accordingly in the report. Whichever
 you choose, state it clearly; do not silently mix settings. See the
 comment block at the top of `src/train.py` for the same note.
 
+## Task 1 extension: hierarchical 4-class (`--task fourclass`)
+
+Task 1 also has a hierarchical extension: `--task fourclass` trains one
+4-class classifier on the same `Label` column, then `evaluate.py` reports
+the result at **two levels**:
+
+- **Level 1 (binary)** -- Darknet vs Benign, obtained by grouping the
+  4-class prediction (Tor, VPN → Darknet; Non-Tor, NonVPN → Benign). This
+  mirrors the base paper's own hierarchical labeling (Level 1 binary,
+  Level 2 four-class).
+- **Level 2 (4-class)** -- the full per-class result over Tor, VPN,
+  Non-Tor, NonVPN.
+
+The four classes nest exactly under the binary labels, so Level 1 is just
+a grouping of Level 2. **Tor is rare (~1.1% of rows, ~55x imbalance vs
+Non-Tor)**, so it is expected to be the hardest class -- class weights are
+enabled by default for this task, and the headline Level-2 metrics are
+**macro-F1 and the per-class confusion matrix**, not overall accuracy.
+Level 1's numbers should land close to the dedicated `binary` task's
+results (same coarse decision, routed through a 4-class model instead) --
+the dedicated `binary` task remains the official binary result.
+
+Run it the same way as the other tasks:
+```bash
+python src/train.py    --task fourclass
+python src/evaluate.py --task fourclass
+```
+Outputs go to `results/fourclass/` and `figures/fourclass/`.
+
 ## How to run
 
 ### Local
@@ -154,17 +187,19 @@ This machine is not used for training. Only the source code lives here:
 4. Runtime -> Change runtime type -> GPU.
 5. Runtime -> Run all. This clones the repo, installs light dependencies
    (pandas, scikit-learn, etc. -- TensorFlow is **not** reinstalled, to keep
-   Colab's CUDA-matched build), then runs **both tasks** end to end:
+   Colab's CUDA-matched build), then runs **all three tasks** end to end:
    ```bash
    python src/train.py    --task binary
    python src/evaluate.py --task binary
    python src/train.py    --task application
    python src/evaluate.py --task application
+   python src/train.py    --task fourclass
+   python src/evaluate.py --task fourclass
    ```
    and displays each task's figures and metrics inline. Outputs are kept
    separate per task under `results/binary/`, `results/application/`,
-   `figures/binary/`, `figures/application/` so the two runs never
-   overwrite each other.
+   `results/fourclass/`, `figures/binary/`, `figures/application/`,
+   `figures/fourclass/` so the three runs never overwrite each other.
 
 ## Repository structure
 
@@ -186,10 +221,12 @@ transformer-enhanced-lstm-implementation/
 │   └── colab_train.ipynb
 ├── results/
 │   ├── binary/
-│   └── application/
+│   ├── application/
+│   └── fourclass/
 └── figures/
     ├── binary/
-    └── application/
+    ├── application/
+    └── fourclass/
 ```
 
 ## Results
@@ -223,6 +260,23 @@ imbalance) -- that's expected, not a regression. Expect small classes
 streaming/browsing classes. A clear, honestly-reported per-class result
 (see `results/application/classification_report.txt` and the confusion
 matrix) is the deliverable, not a single inflated number.
+
+**Fourclass (hierarchical Tor/VPN/Non-Tor/NonVPN)** -- report both levels:
+
+| Level | Accuracy | F1 / Macro F1 | Recall / Macro Recall | Precision / Macro Precision | AUC / Macro AUC | Specificity |
+|---|---|---|---|---|---|---|
+| Level 1 (binary, grouped) | TBD | TBD | TBD | TBD | TBD | TBD |
+| Level 2 (4-class)         | TBD | TBD | TBD | TBD | TBD | -- |
+
+Level 1 should land close to the dedicated `binary` task's numbers -- it's
+the same coarse decision, just routed through a 4-class model; small
+differences are normal, and the dedicated `binary` task remains the
+official binary result. Level 2's overall accuracy will read high because
+Non-Tor dominates -- don't be fooled by that; judge it by **macro-F1** and
+the confusion matrix (see `results/fourclass/classification_report.txt`).
+Expect **Tor to be the weak class** (few samples) and some VPN/NonVPN or
+Tor/Non-Tor confusion. A clean, honestly-reported per-class result, with
+Tor visibly the hardest, is the deliverable.
 
 ## Team members
 

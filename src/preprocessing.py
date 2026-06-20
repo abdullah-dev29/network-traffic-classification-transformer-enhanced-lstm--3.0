@@ -40,6 +40,7 @@ def load_and_prepare(config) -> dict:
     y = darknet_mask.astype(int)
 
     # 3. Drop label columns from X
+    # Label.1 (8 application types) needs casing normalization before it could ever be used.
     drop_cols = [config.LABEL_COL]
     if config.APP_LABEL_COL in df.columns:
         drop_cols.append(config.APP_LABEL_COL)

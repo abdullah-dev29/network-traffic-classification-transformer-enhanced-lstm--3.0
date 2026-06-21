@@ -1,5 +1,5 @@
 """
-Transformer-Enhanced LSTM, shared between three tasks:
+Transformer-Enhanced LSTM, shared between six tasks:
 
 - "binary": Darknet vs Benign (sigmoid head, binary_crossentropy / focal).
 - "application": 8-class application type from Label.1 (softmax head,
@@ -7,6 +7,16 @@ Transformer-Enhanced LSTM, shared between three tasks:
 - "fourclass": 4-class Tor/VPN/Non-Tor/NonVPN from Label (softmax head,
   sparse_categorical_crossentropy -- same multiclass head as "application",
   just a different n_classes).
+- "ids_binary": Benign vs any attack, CIC-IDS2017 (sigmoid head, same loss
+  options as "binary" -- just a different dataset).
+- "ids_family" / "ids_multi": coarse / fine attack classification,
+  CIC-IDS2017 (softmax head, sparse_categorical_crossentropy -- same
+  multiclass head as "application"/"fourclass", just different n_classes).
+
+The architecture itself is dataset-agnostic: it never changed between
+Phase 2 (CIC-Darknet2020) and Phase 3 (CIC-IDS2017) re-targeting -- only
+n_features (set by whichever dataset's preprocessing branch ran) and
+n_classes (set by the task) vary.
 
 This model evolves the Phase 1 CNN-LSTM baseline rather than replacing it.
 It keeps the CNN front-end (local feature extraction) and an LSTM
@@ -77,16 +87,22 @@ class LearnablePositionalEncoding(layers.Layer):
         return inputs + self.pos_embedding
 
 
+BINARY_TASKS = ("binary", "ids_binary")
+MULTICLASS_TASKS = ("application", "fourclass", "ids_family", "ids_multi")
+
+
 def build_transformer_lstm(
     n_features: int, n_classes: int, task: str, n_channels: int = 1
 ) -> tf.keras.Model:
     """Build and compile the Transformer-Enhanced LSTM for `task`. Does not fit the model.
 
-    task == "binary": n_classes is ignored for the head (single sigmoid unit).
-    task in ("application", "fourclass"): n_classes sets the softmax head's
-    width (8 or 4 respectively) -- both use the same multiclass head.
+    task in ("binary", "ids_binary"): n_classes is ignored for the head
+    (single sigmoid unit).
+    task in ("application", "fourclass", "ids_family", "ids_multi"):
+    n_classes sets the softmax head's width -- all four use the same
+    multiclass head.
     """
-    if task not in ("binary", "application", "fourclass"):
+    if task not in BINARY_TASKS + MULTICLASS_TASKS:
         raise ValueError(f"Unknown task: {task!r}")
 
     inputs = Input(shape=(n_features, n_channels))
@@ -124,7 +140,7 @@ def build_transformer_lstm(
     x = layers.Dense(config.DENSE_HEAD_UNITS, activation="relu")(x)
     x = layers.Dropout(config.DROPOUT_RATE)(x)
 
-    if task == "binary":
+    if task in BINARY_TASKS:
         outputs = layers.Dense(1, activation="sigmoid")(x)
         loss = BinaryFocalCrossentropy() if config.LOSS_FN == "focal" else "binary_crossentropy"
         metrics = [
@@ -133,7 +149,7 @@ def build_transformer_lstm(
             Recall(name="recall"),
             AUC(name="auc"),
         ]
-    else:  # application or fourclass -- both use the multiclass head
+    else:  # application, fourclass, ids_family, ids_multi -- all use the multiclass head
         outputs = layers.Dense(n_classes, activation="softmax")(x)
         loss = "sparse_categorical_crossentropy"
         # Multiclass precision/recall/AUC are computed in evaluate.py via sklearn instead.
@@ -146,9 +162,15 @@ def build_transformer_lstm(
 
 if __name__ == "__main__":
     # Shape self-verification only -- builds and prints summaries, never fits.
-    print("=== binary head ===")
+    print("=== binary head (CIC-Darknet2020, 62 features) ===")
     build_transformer_lstm(n_features=62, n_classes=2, task="binary").summary()
-    print("\n=== application head ===")
+    print("\n=== application head (CIC-Darknet2020, 62 features) ===")
     build_transformer_lstm(n_features=62, n_classes=8, task="application").summary()
-    print("\n=== fourclass head ===")
+    print("\n=== fourclass head (CIC-Darknet2020, 62 features) ===")
     build_transformer_lstm(n_features=62, n_classes=4, task="fourclass").summary()
+    print("\n=== ids_binary head (CIC-IDS2017, 69 features) ===")
+    build_transformer_lstm(n_features=69, n_classes=2, task="ids_binary").summary()
+    print("\n=== ids_family head (CIC-IDS2017, 69 features) ===")
+    build_transformer_lstm(n_features=69, n_classes=8, task="ids_family").summary()
+    print("\n=== ids_multi head (CIC-IDS2017, 69 features) ===")
+    build_transformer_lstm(n_features=69, n_classes=11, task="ids_multi").summary()

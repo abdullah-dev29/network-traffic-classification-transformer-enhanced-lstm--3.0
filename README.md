@@ -1,71 +1,188 @@
-# Transformer-Enhanced LSTM for Darknet Traffic Classification
+# Transformer-Enhanced LSTM for Network Intrusion Detection
 
-This is Phase 2 of a 3-phase Computer Networks project. Phase 1 built a CNN-LSTM
-baseline. This phase builds an **improved model**, a Transformer-Enhanced LSTM,
-on the CIC-Darknet2020 dataset. The model is an evolution of the Phase 1
-baseline -- it keeps the CNN front-end and LSTM, then adds Transformer encoder
-blocks (multi-head self-attention) before the classification head.
+Phase 1 of this project built a CNN-LSTM baseline on CIC-Darknet2020. Phase 2
+(this repo) built an **improved model**, a Transformer-Enhanced LSTM, on the
+same dataset -- an evolution of the Phase 1 baseline that keeps the CNN
+front-end and LSTM, then adds Transformer encoder blocks (multi-head
+self-attention) before the classification head.
 
-The model supports **three tasks**, selected with `--task`:
+**Phase 3 re-targets the dataset-facing layer to CIC-IDS2017** -- a larger,
+more standard network-intrusion-detection dataset -- without changing the
+model architecture at all. Only `config.py`'s data-loading/label constants
+and `src/preprocessing.py` changed; `src/model.py`'s `build_transformer_lstm`
+is untouched. The CIC-Darknet2020 code paths (`--task binary/application/
+fourclass`) are left in place for lineage but are now **inert locally** --
+the original dataset parquet has been removed from this repo.
 
-- **`binary`** -- Darknet vs Benign traffic, from the `Label` column. Phase 3
-  will compare this against the Phase 1 baseline on the exact same held-out
-  test rows.
-- **`application`** -- 8-class application type (e.g. Browsing, P2P,
-  Video-Streaming), from the `Label.1` column. This is a separate,
-  additional task with no Phase 1 equivalent to compare against.
-- **`fourclass`** -- a hierarchical extension of Task 1: trains one 4-class
-  classifier on the same `Label` column (Tor, VPN, Non-Tor, NonVPN) and
-  reports results at two levels, binary (grouped) and 4-class. See
-  "Task 1 extension" below.
+The model supports **six tasks** total, selected with `--task`:
 
-## Dataset
+**CIC-IDS2017 (Phase 3, current):**
+- **`ids_binary`** -- Benign vs any attack, from `Label`. The one task that
+  is genuinely class-comparable to the CIC-Darknet2020 `binary` result.
+- **`ids_family`** -- coarse attack families (BENIGN + 7 buckets: DoS/DDoS,
+  Brute-Force, Web-Attack, Botnet, PortScan, Infiltration, Other).
+- **`ids_multi`** -- fine attack types (11 classes after merging the three
+  Web Attack variants and dropping two ultra-rare classes).
 
-- Source: `dhoogla/cicdarknet2020` (Kaggle), same file used in Phase 1.
-- Verified shape: **103,121 rows x 79 columns** (77 features + 2 label columns).
-- No missing values, no infinite values, no duplicate rows in this build.
-- Two label columns:
-  - `Label` -- 4-class traffic type: `Non-Tor`, `NonVPN`, `VPN`, `Tor`.
-    Note the exact spelling: `Non-Tor` is hyphenated, `NonVPN` is not.
-    Used for the **binary** task.
-  - `Label.1` -- 8 application types, with inconsistent casing in the raw
-    data. Used for the **application** task, after normalization.
-- Binary target (`--task binary`):
-  - **Darknet (class 1)**: `Label` in `{Tor, VPN}` -- 18,101 rows (17.6%)
-  - **Benign (class 0)**: `Label` in `{Non-Tor, NonVPN}` -- 85,020 rows (82.4%)
-  - Because of this imbalance, **F1, recall, and the confusion matrix** are
-    the headline metrics, not raw accuracy.
-- Application target (`--task application`): `Label.1` has casing variants
-  (e.g. `AUDIO-STREAMING`, `Video-streaming`, `File-transfer`) that collapse
-  to 8 canonical classes (`config.APP_LABEL_CANON`, applied in
-  `src/preprocessing.py`):
+**CIC-Darknet2020 (Phase 2, inert):**
+- `binary`, `application`, `fourclass` -- code paths remain in `src/` for
+  lineage but cannot run locally without the removed dataset file.
+
+## Dataset (CIC-IDS2017)
+
+- Source: `dhoogla/cicids2017` (Kaggle), "no-metadata" cleaned parquet --
+  already stripped of Flow ID / source-destination IP / port / timestamp
+  columns (verified below).
+- Shipped as **8 day/attack-type files** under `CIC-IDS2017/`. All 8 are
+  concatenated by `src/preprocessing.py` (`_load_ids2017`) -- using only
+  some of them would silently drop whole classes (e.g. Heartbleed exists
+  in exactly one file).
+
+  | File | Rows |
+  |---|---|
+  | Benign-Monday-no-metadata.parquet | 458,831 |
+  | Botnet-Friday-no-metadata.parquet | 176,038 |
+  | Bruteforce-Tuesday-no-metadata.parquet | 389,714 |
+  | DDoS-Friday-no-metadata.parquet | 221,264 |
+  | DoS-Wednesday-no-metadata.parquet | 584,991 |
+  | Infiltration-Thursday-no-metadata.parquet | 207,630 |
+  | Portscan-Friday-no-metadata.parquet | 119,522 |
+  | WebAttacks-Thursday-no-metadata.parquet | 155,820 |
+  | **Combined** | **2,313,810** |
+
+- **Combined shape: 2,313,810 rows x 78 columns** (77 numeric features + 1
+  label column). All 8 files have identical columns -- no schema mismatch.
+- Label column: **`Label`** (exact name, no surrounding whitespace), 15 raw
+  classes:
 
   | Class | Count |
   |---|---|
-  | Browsing | 29,862 |
-  | P2P | 23,404 |
-  | Audio-Streaming | 11,328 |
-  | File-Transfer | 10,647 |
-  | Chat | 10,365 |
-  | Video-Streaming | 9,012 |
-  | Email | 5,442 |
-  | VOIP | 3,061 |
+  | Benign | 1,977,318 |
+  | DoS Hulk | 172,846 |
+  | DDoS | 128,014 |
+  | DoS GoldenEye | 10,286 |
+  | FTP-Patator | 5,931 |
+  | DoS slowloris | 5,385 |
+  | DoS Slowhttptest | 5,228 |
+  | SSH-Patator | 3,219 |
+  | PortScan | 1,956 |
+  | Web Attack -- Brute Force | 1,470 |
+  | Bot | 1,437 |
+  | Web Attack -- XSS | 652 |
+  | Infiltration | 36 |
+  | Web Attack -- Sql Injection | 21 |
+  | Heartbleed | 11 |
 
-  Imbalance ratio ~9.8x (Browsing vs VOIP) -- **macro-F1 and the per-class
-  confusion matrix** are the headline metrics here, not overall accuracy.
-- 15 constant (zero-variance) columns are dropped programmatically
-  (`nunique() <= 1`), leaving ~62 usable features. They are not hardcoded;
-  `src/preprocessing.py` detects and drops them at runtime and prints the list.
-  This is identical for both tasks.
-- The parquet file is committed to this repo (~12.8 MB) so that Colab can
-  pull it via `git clone` -- no separate download step is required.
+  **Two label-string gotchas, copy exactly, do not "fix":**
+  - The benign string is **`"Benign"`**, not all-caps `"BENIGN"` -- the
+    all-caps form is only used as the `ids_family` bucket name
+    (`config.FAMILY_EXACT["Benign"] = "BENIGN"`).
+  - The three `Web Attack` labels carry a **corrupted dash byte (`U+FFFD`)**
+    between `"Web Attack"` and the variant name in the source parquet (a
+    pre-existing artifact of the upstream dataset, not introduced here).
+    All matching is done on the clean ASCII prefix `"Web Attack"`
+    (`str.startswith`), which sidesteps the corrupted byte entirely.
+- No missing values, no infinite values. **82,274 duplicate rows** are
+  dropped during preprocessing (all `Benign`; the count is taken after the
+  label column is dropped from the feature matrix, consistent with how the
+  existing darknet pipeline checks duplicates -- a small number of rows
+  share identical features but different labels, a known CICIDS2017 flow-
+  export quirk).
+- **No identifier/leakage columns** are present (no Flow ID, IPs, ports, or
+  timestamp) -- already stripped by this "no-metadata" build. `config.
+  IDS_DROP_COLS` is intentionally empty.
+- **8 constant (zero-variance) columns** are dropped programmatically (same
+  `nunique() <= 1` mechanism as the darknet pipeline, not hardcoded):
+  `Bwd PSH Flags`, `Bwd URG Flags`, `Fwd Avg Bytes/Bulk`,
+  `Fwd Avg Packets/Bulk`, `Fwd Avg Bulk Rate`, `Bwd Avg Bytes/Bulk`,
+  `Bwd Avg Packets/Bulk`, `Bwd Avg Bulk Rate`.
+- **69 usable features** remain after dropping the label column and the 8
+  constant columns.
+- The 8 parquet files (~265 MB total) are committed to this repo so Colab
+  can pull them via `git clone` -- no separate download step required.
+
+## Tasks (CIC-IDS2017)
+
+### `ids_binary` -- Benign vs Attack
+
+`Label == "Benign"` &rarr; 0, anything else &rarr; 1.
+- Benign: 1,895,314 rows (84.9%) after dedup
+- Attack: 336,492 rows (15.1%) after dedup -- ~5.6x imbalance (milder than
+  CIC-Darknet2020's Benign:Darknet ratio)
+
+This is the **headline comparison** with the CIC-Darknet2020 `binary`
+result -- same six metrics (accuracy, F1, recall, precision, AUC,
+specificity), same threshold-tuning methodology (`config.TUNE_THRESHOLD`),
+same split parameters. It's the one number that's genuinely apples-to-apples
+across both datasets.
+
+### `ids_family` -- coarse attack families
+
+Each fine label is mapped to one of 8 buckets
+(`config.FAMILY_EXACT` / `_map_family()` in `src/preprocessing.py`):
+
+| Family | Count | Source labels |
+|---|---|---|
+| BENIGN | 1,977,318 | Benign |
+| DoS/DDoS | 321,759 | DoS Hulk, DDoS, DoS GoldenEye, DoS slowloris, DoS Slowhttptest |
+| Brute-Force | 9,150 | FTP-Patator, SSH-Patator |
+| Web-Attack | 2,143 | Web Attack (Brute Force / XSS / Sql Injection) |
+| PortScan | 1,956 | PortScan |
+| Botnet | 1,437 | Bot |
+| Infiltration | 36 | Infiltration |
+| Other | 11 | Heartbleed (too rare -- 11 rows -- to stratify as its own family) |
+
+### `ids_multi` -- fine attack types
+
+The full fine-grained label set, with two cleanups before `LabelEncoder`:
+
+1. The three `Web Attack ...` variants are merged into one clean `Web
+   Attack` class (2,143 rows).
+2. **Rare-class rule** (`config.MIN_CLASS_COUNT = 100`): a class with fewer
+   rows is folded into its `ids_family` bucket if a same-family sibling
+   survives at &ge; 100 rows in the fine label set (a real merge);
+   otherwise its rows are dropped. In this dataset, **Infiltration (36
+   rows)** and **Heartbleed (11 rows)** both have no surviving sibling at
+   the fine level -- their families are singletons (`Infiltration` and
+   `Other`/Heartbleed respectively have no other member) -- so folding
+   would be a no-op and they are **dropped** instead (47 rows total).
+
+Final 11 classes: `Benign`, `DoS Hulk`, `DDoS`, `DoS GoldenEye`,
+`FTP-Patator`, `DoS slowloris`, `DoS Slowhttptest`, `SSH-Patator`,
+`Web Attack`, `PortScan`, `Bot`.
+
+### Honest comparison framing
+
+Only **`ids_binary`** is class-comparable to a CIC-Darknet2020 result (the
+dedicated `binary` task). **`ids_family`/`ids_multi`** demonstrate the
+**same model architecture generalizing to a second dataset** on coarse/fine
+multiclass intrusion detection -- their class-level numbers are **not**
+comparable to the darknet `fourclass`/`application` classes, since the
+problem domains are entirely different (encrypted-traffic-type
+classification vs attack-type classification). The comparison story here is
+"same model, second dataset, still works" -- not "same classes, different
+dataset."
+
+The dataset is highly imbalanced (Benign dominates `ids_family`/
+`ids_multi`), and several rare attack classes were merged or dropped as
+described above -- judge `ids_family`/`ids_multi` by **macro-F1** and the
+confusion matrix, not raw accuracy. Expect the rarest surviving classes
+(e.g. `Botnet`/`Bot`, `Infiltration`) to be the weak spots even after this
+handling -- that's an honest, expected finding, not a bug.
+
+If `config.SUBSAMPLE_N` is set for a given run, the reported numbers are on
+a stratified majority-only-downsampled subsample (every minority/attack row
+kept, only Benign downsampled) -- state this alongside any numbers quoted
+from such a run.
 
 ## Model: Transformer-Enhanced LSTM
 
 Built with the Keras **Functional API** (required for the transformer
 block's residual connections), via a single builder,
-`build_transformer_lstm(n_features, n_classes, task)`, shared by both
-tasks. Layer order:
+`build_transformer_lstm(n_features, n_classes, task)`, shared by **all six
+tasks** -- the architecture is completely dataset-agnostic; only
+`n_features` (set by whichever preprocessing branch ran) and `n_classes`
+(set by the task) vary. Layer order:
 
 1. `Conv1D(128, kernel=3, relu, same)` -> `MaxPool1D(2)` -> `Dropout(0.3)`
 2. `Conv1D(64, kernel=3, relu, same)` -> `MaxPool1D(2)`
@@ -77,10 +194,11 @@ tasks. Layer order:
    Phase 1 baseline.
 5. `GlobalAveragePooling1D()` to collapse the attended sequence to a vector
 6. `Dense(64, relu)` -> `Dropout(0.3)` -> **task-specific output head**:
-   - `binary`: `Dense(1, sigmoid)`, `binary_crossentropy` loss (or
-     `BinaryFocalCrossentropy` if `LOSS_FN="focal"`).
-   - `application`: `Dense(8, softmax)`, `sparse_categorical_crossentropy`
-     loss (no one-hot encoding needed).
+   - `binary` / `ids_binary`: `Dense(1, sigmoid)`, `binary_crossentropy`
+     loss (or `BinaryFocalCrossentropy` if `LOSS_FN="focal"`).
+   - `application` / `fourclass` / `ids_family` / `ids_multi`:
+     `Dense(n_classes, softmax)`, `sparse_categorical_crossentropy` loss
+     (no one-hot encoding needed).
 
 **What changed vs. the Phase 1 baseline:** the second sequence-modeling stage
 is now Transformer encoder block(s) (multi-head self-attention) applied to the
@@ -98,15 +216,17 @@ continuous tabular features), and the LSTM is a standard Keras `LSTM` layer.
   (doubles its output width; the transformer block's residual/feed-forward
   dimensions adapt automatically since they're derived from the input
   shape).
-- `LOSS_FN` (default `"bce"`) -- binary task only; `"focal"` switches to
+- `LOSS_FN` (default `"bce"`) -- binary tasks only; `"focal"` switches to
   `BinaryFocalCrossentropy`, an alternative imbalance lever.
-- `USE_CLASS_WEIGHT` (binary, default `False`) / `APP_USE_CLASS_WEIGHT`
-  (application, default `True`) -- enable imbalance-aware training per task.
+- `CLASS_WEIGHT_BY_TASK` -- per-task class-weight toggle: both binary tasks
+  default to `False` (no class weight, threshold tuning instead);
+  `application`/`fourclass`/`ids_family`/`ids_multi` default to `True`
+  (`sklearn.compute_class_weight("balanced", ...)` in `train.py`).
 
-## Comparison integrity with Phase 1 (binary task only)
+## Comparison integrity with Phase 1 (CIC-Darknet2020 `binary` only)
 
 Everything except the model architecture is held identical to Phase 1, so
-that Phase 3's comparison is apples-to-apples:
+that the darknet `binary` comparison is apples-to-apples:
 
 - Same dataset file and path, same binary label mapping.
 - Same `preprocessing.py` logic: same constant-column drop, `StandardScaler`
@@ -115,61 +235,42 @@ that Phase 3's comparison is apples-to-apples:
   `VAL_SIZE=0.20` -- this means the held-out **test set is the exact same
   rows** as Phase 1.
 - Same six metrics and `metrics.json` schema, so Phase 3 can load both
-  phases' `metrics.json` files and tabulate them directly (the binary
-  schema now nests metrics under `threshold_0_5` and `threshold_tuned`,
-  see below).
+  phases' `metrics.json` files and tabulate them directly.
 
 ### Binary fairness fix: matched training + threshold tuning
 
-An earlier version of this model trained with `USE_CLASS_WEIGHT=True`,
-which won on F1/AUC/recall but lost on precision/accuracy against the
-Phase 1 baseline (trained without class weights) -- not an apples-to-apples
-comparison, since the two models weren't trained the same way.
+An earlier version of this model trained the darknet `binary` task with
+`USE_CLASS_WEIGHT=True`, which won on F1/AUC/recall but lost on
+precision/accuracy against the Phase 1 baseline (trained without class
+weights) -- not an apples-to-apples comparison.
 
-The **default is now matched to the baseline**: `USE_CLASS_WEIGHT=False`.
+The **default is matched to the baseline**: `USE_CLASS_WEIGHT=False`.
 Instead of skewing the loss with class weights, the model's higher AUC is
 cashed in via **validation-set threshold tuning** (`TUNE_THRESHOLD=True`):
 `evaluate.py` sweeps thresholds on the validation set, picks the one that
 maximizes F1, and applies it to the test set. Metrics are reported at
 **both** the default 0.5 threshold and the tuned threshold, so neither
-number is hidden -- expect the tuned threshold to trade some of the
-lopsided recall for much better precision, landing on a more balanced
-operating point.
+number is hidden. The CIC-IDS2017 `ids_binary` task uses the **same
+no-class-weight + tuned-threshold approach** by default
+(`IDS_BINARY_USE_CLASS_WEIGHT=False`) -- both binary tasks are handled
+identically.
 
-To instead run the "best-result" class-weighted variant (a separate, valid
-choice, not a substitute for threshold tuning), set `USE_CLASS_WEIGHT=True`
-in `config.py` and describe the run accordingly in the report. Whichever
-you choose, state it clearly; do not silently mix settings. See the
-comment block at the top of `src/train.py` for the same note.
+## Task 1 extension: hierarchical 4-class (CIC-Darknet2020 `--task fourclass`)
 
-## Task 1 extension: hierarchical 4-class (`--task fourclass`)
-
-Task 1 also has a hierarchical extension: `--task fourclass` trains one
-4-class classifier on the same `Label` column, then `evaluate.py` reports
-the result at **two levels**:
+The CIC-Darknet2020 `binary` task also has a hierarchical extension:
+`--task fourclass` trains one 4-class classifier on the same `Label` column,
+then `evaluate.py` reports the result at **two levels**:
 
 - **Level 1 (binary)** -- Darknet vs Benign, obtained by grouping the
-  4-class prediction (Tor, VPN → Darknet; Non-Tor, NonVPN → Benign). This
-  mirrors the base paper's own hierarchical labeling (Level 1 binary,
-  Level 2 four-class).
+  4-class prediction (Tor, VPN → Darknet; Non-Tor, NonVPN → Benign).
 - **Level 2 (4-class)** -- the full per-class result over Tor, VPN,
   Non-Tor, NonVPN.
 
-The four classes nest exactly under the binary labels, so Level 1 is just
-a grouping of Level 2. **Tor is rare (~1.1% of rows, ~55x imbalance vs
-Non-Tor)**, so it is expected to be the hardest class -- class weights are
-enabled by default for this task, and the headline Level-2 metrics are
-**macro-F1 and the per-class confusion matrix**, not overall accuracy.
-Level 1's numbers should land close to the dedicated `binary` task's
-results (same coarse decision, routed through a 4-class model instead) --
-the dedicated `binary` task remains the official binary result.
-
-Run it the same way as the other tasks:
-```bash
-python src/train.py    --task fourclass
-python src/evaluate.py --task fourclass
-```
-Outputs go to `results/fourclass/` and `figures/fourclass/`.
+This is inert locally now (dataset file removed), kept for lineage. Note
+that `ids_family`/`ids_multi` do **not** get this two-level treatment --
+they are reported as flat multiclass tasks via the shared
+`evaluate_multiclass()`, since (unlike `fourclass` vs `binary`) they aren't
+a finer-grained version of `ids_binary` sharing the same trained model.
 
 ## How to run
 
@@ -187,19 +288,24 @@ This machine is not used for training. Only the source code lives here:
 4. Runtime -> Change runtime type -> GPU.
 5. Runtime -> Run all. This clones the repo, installs light dependencies
    (pandas, scikit-learn, etc. -- TensorFlow is **not** reinstalled, to keep
-   Colab's CUDA-matched build), then runs **all three tasks** end to end:
+   Colab's CUDA-matched build), then runs **all three CIC-IDS2017 tasks**
+   end to end:
    ```bash
-   python src/train.py    --task binary
-   python src/evaluate.py --task binary
-   python src/train.py    --task application
-   python src/evaluate.py --task application
-   python src/train.py    --task fourclass
-   python src/evaluate.py --task fourclass
+   python src/train.py    --task ids_binary
+   python src/evaluate.py --task ids_binary
+   python src/train.py    --task ids_family
+   python src/evaluate.py --task ids_family
+   python src/train.py    --task ids_multi
+   python src/evaluate.py --task ids_multi
    ```
    and displays each task's figures and metrics inline. Outputs are kept
-   separate per task under `results/binary/`, `results/application/`,
-   `results/fourclass/`, `figures/binary/`, `figures/application/`,
-   `figures/fourclass/` so the three runs never overwrite each other.
+   separate per task under `results/ids_binary/`, `results/ids_family/`,
+   `results/ids_multi/`, `figures/ids_binary/`, `figures/ids_family/`,
+   `figures/ids_multi/` so the three runs never overwrite each other.
+
+   **If training is slow** on this ~2.2M-row dataset, set `config.SUBSAMPLE_N`
+   (e.g. `500_000`) before pushing -- it keeps every minority/attack row and
+   only downsamples Benign, so rare classes aren't lost.
 
 ## Repository structure
 
@@ -209,8 +315,15 @@ transformer-enhanced-lstm-implementation/
 ├── requirements.txt
 ├── .gitignore
 ├── config.py
-├── CIC-darknet2020-dataset/
-│   └── cicdarknet2020.parquet
+├── CIC-IDS2017/
+│   ├── Benign-Monday-no-metadata.parquet
+│   ├── Botnet-Friday-no-metadata.parquet
+│   ├── Bruteforce-Tuesday-no-metadata.parquet
+│   ├── DDoS-Friday-no-metadata.parquet
+│   ├── DoS-Wednesday-no-metadata.parquet
+│   ├── Infiltration-Thursday-no-metadata.parquet
+│   ├── Portscan-Friday-no-metadata.parquet
+│   └── WebAttacks-Thursday-no-metadata.parquet
 ├── src/
 │   ├── __init__.py
 │   ├── preprocessing.py
@@ -220,63 +333,55 @@ transformer-enhanced-lstm-implementation/
 ├── notebooks/
 │   └── colab_train.ipynb
 ├── results/
-│   ├── binary/
-│   ├── application/
-│   └── fourclass/
+│   ├── ids_binary/
+│   ├── ids_family/
+│   └── ids_multi/
 └── figures/
-    ├── binary/
-    ├── application/
-    └── fourclass/
+    ├── ids_binary/
+    ├── ids_family/
+    └── ids_multi/
 ```
 
 ## Results
 
 To be filled in after running `notebooks/colab_train.ipynb` on Colab.
 
-**Binary (Darknet vs Benign)** -- report both rows; the tuned threshold is
-the recommended operating point:
+**`ids_binary` (Benign vs Attack)** -- the headline result, directly
+comparable to CIC-Darknet2020's `binary` result; report both rows, the
+tuned threshold is the recommended operating point:
 
 | Model                                 | Accuracy | F1  | Recall | Precision | AUC | Specificity |
 |----------------------------------------|----------|-----|--------|-----------|-----|-------------|
 | Transformer-Enhanced LSTM (thr=0.50)  | TBD      | TBD | TBD    | TBD       | TBD | TBD         |
 | Transformer-Enhanced LSTM (thr=best)  | TBD      | TBD | TBD    | TBD       | TBD | TBD         |
 
-With the matched setup (class weights off) plus tuned threshold, expect
-the transformer to win or tie on **F1** at a balanced precision/recall
-(not the lopsided high-recall/low-precision split seen under blind 0.5 +
-class weighting) -- the better AUC is now spent at a better operating
-point. Report F1 and AUC as the headline binary numbers.
+CIC-IDS2017 attacks tend to be fairly separable, so expect strong numbers
+here -- this is the one result that's genuinely on the same page as the
+CIC-Darknet2020 `binary` task. Report F1 and AUC as the headline numbers.
 
-**Application-type (8-class)** -- judge by macro-F1 and the confusion
-matrix, not raw accuracy:
+**`ids_family` (coarse attack families, 8 classes)** -- judge by macro-F1
+and the confusion matrix, not raw accuracy:
 
 | Model                      | Accuracy | Macro F1 | Weighted F1 | Macro Precision | Macro Recall | Macro AUC |
 |-----------------------------|----------|----------|-------------|------------------|--------------|-----------|
 | Transformer-Enhanced LSTM  | TBD      | TBD      | TBD         | TBD              | TBD          | TBD       |
 
-Overall accuracy will look lower than the binary task (8 classes, ~10x
-imbalance) -- that's expected, not a regression. Expect small classes
-(VOIP, Email) to be the hardest, and some confusion among the
-streaming/browsing classes. A clear, honestly-reported per-class result
-(see `results/application/classification_report.txt` and the confusion
-matrix) is the deliverable, not a single inflated number.
+Expect the rarest families (`Infiltration`, `Other`/Heartbleed) to be the
+weak spots -- that's an honest, expected finding given 36 and 11 rows
+respectively, not a regression.
 
-**Fourclass (hierarchical Tor/VPN/Non-Tor/NonVPN)** -- report both levels:
+**`ids_multi` (fine attack types, 11 classes)** -- judge by macro-F1 and the
+confusion matrix, not raw accuracy:
 
-| Level | Accuracy | F1 / Macro F1 | Recall / Macro Recall | Precision / Macro Precision | AUC / Macro AUC | Specificity |
-|---|---|---|---|---|---|---|
-| Level 1 (binary, grouped) | TBD | TBD | TBD | TBD | TBD | TBD |
-| Level 2 (4-class)         | TBD | TBD | TBD | TBD | TBD | -- |
+| Model                      | Accuracy | Macro F1 | Weighted F1 | Macro Precision | Macro Recall | Macro AUC |
+|-----------------------------|----------|----------|-------------|------------------|--------------|-----------|
+| Transformer-Enhanced LSTM  | TBD      | TBD      | TBD         | TBD              | TBD          | TBD       |
 
-Level 1 should land close to the dedicated `binary` task's numbers -- it's
-the same coarse decision, just routed through a 4-class model; small
-differences are normal, and the dedicated `binary` task remains the
-official binary result. Level 2's overall accuracy will read high because
-Non-Tor dominates -- don't be fooled by that; judge it by **macro-F1** and
-the confusion matrix (see `results/fourclass/classification_report.txt`).
-Expect **Tor to be the weak class** (few samples) and some VPN/NonVPN or
-Tor/Non-Tor confusion. A clean, honestly-reported per-class result, with
-Tor visibly the hardest, is the deliverable.
+`ids_family`/`ids_multi` are **not** comparable class-for-class to the
+CIC-Darknet2020 `fourclass`/`application` results -- different problem
+domain. The comparison story is "same model, second dataset, still works,"
+not "same classes." If a run used `config.SUBSAMPLE_N`, say so here so the
+numbers are interpreted correctly.
 
 ## Team members
 

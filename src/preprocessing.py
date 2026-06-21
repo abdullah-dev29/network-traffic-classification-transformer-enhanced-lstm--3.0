@@ -1,6 +1,8 @@
 """
-Preprocessing pipeline for CIC-Darknet2020, supporting three tasks:
+Preprocessing pipeline for CIC-Darknet2020 (Phase 2, inert) and CIC-IDS2017
+(Phase 3, current), supporting six tasks:
 
+CIC-Darknet2020 (single parquet, config.DATA_PATH):
 - "binary": Darknet vs Benign from `Label`. Logically IDENTICAL to the
   original Phase 1 baseline pipeline -- same label mapping, same
   constant-column drop, same stratified split with the same RANDOM_STATE,
@@ -13,14 +15,27 @@ Preprocessing pipeline for CIC-Darknet2020, supporting three tasks:
   Non-Tor, NonVPN) from `Label`. evaluate.py reports this hierarchically --
   the 4-class result, plus a binary view obtained by grouping it.
 
-All three tasks share identical cleaning / constant-column-drop / scaling /
+CIC-IDS2017 (folder of parquets, config.DATA_DIR, all concatenated -- see
+_load_ids2017()):
+- "ids_binary": Benign (0) vs any attack (1) from `Label`. The one task
+  that is genuinely class-comparable to the darknet "binary" task.
+- "ids_family": coarse attack families (DoS/DDoS, Brute-Force, Web-Attack,
+  Botnet, PortScan, Infiltration, Other) from `Label`, via _map_family().
+- "ids_multi": fine attack types from `Label`, with the three Web Attack
+  variants merged into one class and ultra-rare classes folded/dropped
+  per config.MIN_CLASS_COUNT -- see _build_ids_multi_target().
+
+All six tasks share identical cleaning / constant-column-drop / scaling /
 reshape / split mechanics -- they only differ in how the target `y` (and
-which label columns get dropped from `X`) is constructed.
+which label columns get dropped from `X`) is constructed. The CIC-IDS2017
+tasks additionally support an optional stratified majority-only downsample
+(config.SUBSAMPLE_N) applied after cleaning, before the split.
 
 Import-safe: nothing in this module trains a model. The __main__ demo at
 the bottom only loads data and prints summary stats (pandas / sklearn only).
 """
 
+import glob
 import json
 import os
 
@@ -29,6 +44,9 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 import joblib
+
+IDS_TASKS = ("ids_binary", "ids_family", "ids_multi")
+DARKNET_TASKS = ("binary", "application", "fourclass")
 
 
 def _build_binary_target(df: pd.DataFrame, config):
@@ -85,35 +103,197 @@ def _build_fourclass_target(df: pd.DataFrame, config):
     return y, X, class_names
 
 
-def load_and_prepare(config, task: str = None) -> dict:
-    """Load the parquet, build the target for `task`, clean, split, and scale.
+def _load_ids2017(config) -> pd.DataFrame:
+    """Glob config.DATA_DIR for *.parquet and concatenate all of them.
 
-    `task` defaults to config.TASK ("binary", "application", or "fourclass").
+    CIC-IDS2017 is shipped here as 8 day/attack-type files that together
+    form the full dataset -- using only some of them would silently drop
+    whole attack classes (e.g. Heartbleed only exists in one file).
+    """
+    files = sorted(glob.glob(os.path.join(config.DATA_DIR, "*.parquet")))
+    if not files:
+        raise FileNotFoundError(f"No parquet files found in {config.DATA_DIR}")
+
+    dfs = [pd.read_parquet(f) for f in files]
+    for f, d in zip(files, dfs):
+        print(f"  {f}: shape={d.shape}")
+
+    common_cols = set(dfs[0].columns)
+    for d in dfs[1:]:
+        common_cols &= set(d.columns)
+    common_cols = [c for c in dfs[0].columns if c in common_cols]
+    if any(len(d.columns) != len(common_cols) for d in dfs):
+        print(f"WARNING: parquet files have differing columns; aligned on {len(common_cols)} common columns")
+
+    df = pd.concat([d[common_cols] for d in dfs], ignore_index=True)
+    print(f"Loaded {len(files)} parquet files from {config.DATA_DIR}, combined shape {df.shape}")
+    return df
+
+
+def _map_family(label: str, config) -> str:
+    """Map a fine CIC-IDS2017 label to its coarse ids_family bucket. See
+    config.py's "CIC-IDS2017 (Phase 3)" block for the documented rule set.
+    """
+    if label in config.FAMILY_EXACT:
+        return config.FAMILY_EXACT[label]
+    if config.FAMILY_DOS_SUBSTR in label:  # also catches "DDoS" (contains "DoS")
+        return "DoS/DDoS"
+    if label.startswith(config.FAMILY_WEBATTACK_PREFIX):
+        return "Web-Attack"
+    return config.FAMILY_DEFAULT
+
+
+def _build_ids_binary_target(df: pd.DataFrame, config):
+    """Benign (0) vs any attack (1) from `Label`."""
+    label = df[config.IDS_LABEL_COL].astype(str).str.strip()
+    y = (label != config.IDS_BENIGN_LABEL).astype(int)
+    X = df.drop(columns=[c for c in [config.IDS_LABEL_COL] + config.IDS_DROP_COLS if c in df.columns])
+    return y, X, config.IDS_BINARY_CLASS_NAMES
+
+
+def _build_ids_family_target(df: pd.DataFrame, config):
+    """Coarse attack-family classification from `Label` via _map_family()."""
+    label = df[config.IDS_LABEL_COL].astype(str).str.strip()
+    families = label.map(lambda v: _map_family(v, config))
+
+    # Anything that landed in "Other" without being the explicitly-documented
+    # Heartbleed catch-all is an unexpected/unmapped label -- surface it
+    # loudly instead of silently lumping it in.
+    unexpected = families.eq(config.FAMILY_DEFAULT) & ~label.isin(
+        [k for k, v in config.FAMILY_EXACT.items() if v == config.FAMILY_DEFAULT]
+    )
+    if unexpected.any():
+        bad = sorted(label[unexpected].unique().tolist())
+        print(f"WARNING: {int(unexpected.sum())} rows fell into '{config.FAMILY_DEFAULT}' via unmapped labels: {bad}")
+
+    print("ids_family bucket counts:", families.value_counts().to_dict())
+
+    encoder = LabelEncoder()
+    y = pd.Series(encoder.fit_transform(families), index=families.index)
+    class_names = encoder.classes_.tolist()
+
+    X = df.drop(columns=[c for c in [config.IDS_LABEL_COL] + config.IDS_DROP_COLS if c in df.columns])
+    return y, X, class_names
+
+
+def _build_ids_multi_target(df: pd.DataFrame, config):
+    """Fine-grained attack-type classification from `Label`.
+
+    Two cleanups before LabelEncoding:
+    1. Merge the three "Web Attack ..." variants into one
+       config.WEBATTACK_MERGED_NAME class.
+    2. Any resulting class with fewer than config.MIN_CLASS_COUNT rows is
+       folded into its ids_family bucket IF a same-family sibling survives
+       at >= MIN_CLASS_COUNT in the fine label set (a real merge), otherwise
+       its rows are dropped (folding a singleton-family class into itself
+       doesn't fix the small-N problem and would still break stratification).
+    """
+    label = df[config.IDS_LABEL_COL].astype(str).str.strip()
+    merged = label.where(~label.str.startswith(config.FAMILY_WEBATTACK_PREFIX), config.WEBATTACK_MERGED_NAME)
+
+    counts = merged.value_counts()
+    rare_classes = counts[counts < config.MIN_CLASS_COUNT].index.tolist()
+
+    keep_mask = pd.Series(True, index=merged.index)
+    folded, dropped = {}, {}
+    for cls in rare_classes:
+        family = _map_family(cls, config)
+        siblings = [
+            c for c in counts.index
+            if c != cls and _map_family(c, config) == family and counts[c] >= config.MIN_CLASS_COUNT
+        ]
+        if siblings:
+            merged = merged.where(merged != cls, family)
+            folded[cls] = {"family": family, "rows": int(counts[cls])}
+        else:
+            keep_mask &= merged != cls
+            dropped[cls] = int(counts[cls])
+
+    print(f"ids_multi: rare classes (< {config.MIN_CLASS_COUNT} rows) folded into a family bucket: {folded}")
+    print(f"ids_multi: rare classes (< {config.MIN_CLASS_COUNT} rows) dropped (no viable fold target): {dropped}")
+
+    df = df.loc[keep_mask]
+    merged = merged.loc[keep_mask]
+    print("ids_multi final class counts:", merged.value_counts().to_dict())
+
+    encoder = LabelEncoder()
+    y = pd.Series(encoder.fit_transform(merged), index=merged.index)
+    class_names = encoder.classes_.tolist()
+
+    X = df.drop(columns=[c for c in [config.IDS_LABEL_COL] + config.IDS_DROP_COLS if c in df.columns])
+    return y, X, class_names
+
+
+def _subsample_majority(X: pd.DataFrame, y: pd.Series, majority_value, n_target: int, random_state: int):
+    """Stratified-ish majority-only downsample: keep every minority row, downsample only `majority_value`."""
+    total = len(X)
+    if n_target is None or total <= n_target:
+        return X, y
+
+    minority_mask = y != majority_value
+    n_minority = int(minority_mask.sum())
+    n_majority_keep = n_target - n_minority
+    if n_majority_keep <= 0:
+        print(
+            f"WARNING: SUBSAMPLE_N={n_target} is smaller than the minority-row count "
+            f"({n_minority}); keeping all rows, no downsampling applied"
+        )
+        return X, y
+
+    majority_idx = y.index[~minority_mask]
+    rng = np.random.RandomState(random_state)
+    keep_majority_idx = rng.choice(majority_idx.to_numpy(), size=n_majority_keep, replace=False)
+    keep_idx = np.concatenate([y.index[minority_mask].to_numpy(), keep_majority_idx])
+
+    print(
+        f"SUBSAMPLE_N={n_target}: kept {n_majority_keep} of {len(majority_idx)} majority rows, "
+        f"all {n_minority} minority rows -> new total {len(keep_idx)}"
+    )
+    return X.loc[keep_idx], y.loc[keep_idx]
+
+
+def load_and_prepare(config, task: str = None) -> dict:
+    """Load the data, build the target for `task`, clean, split, and scale.
+
+    `task` defaults to config.TASK. One of:
+      "binary", "application", "fourclass"   -- CIC-Darknet2020 (Phase 2)
+      "ids_binary", "ids_family", "ids_multi" -- CIC-IDS2017 (Phase 3)
 
     Returns a dict with X_train, y_train, X_val, y_val, X_test, y_test
     (each X reshaped to (n_samples, n_features, 1)), plus n_features,
-    n_classes, feature_names, dropped_cols, and (application/fourclass only)
-    class_names. Those two branches also persist class_names.json under
-    the task's results dir so evaluate.py uses a consistent order.
+    n_classes, feature_names, dropped_cols, and class_names for every task
+    except the two binary tasks (whose class names are fixed in config and
+    don't need persisting). application/fourclass/ids_family/ids_multi
+    persist class_names.json under the task's results dir so evaluate.py
+    uses a consistent order.
     """
     if task is None:
         task = config.TASK
-    if task not in ("binary", "application", "fourclass"):
+    if task not in DARKNET_TASKS + IDS_TASKS:
         raise ValueError(f"Unknown task: {task!r}")
 
     paths = config.get_paths(task)
     os.makedirs(paths.RESULTS_DIR, exist_ok=True)
 
     # 1. Load
-    df = pd.read_parquet(config.DATA_PATH)
+    if task in IDS_TASKS:
+        df = _load_ids2017(config)
+    else:
+        df = pd.read_parquet(config.DATA_PATH)
 
     # 2. Build target + drop label columns from X (task-specific)
     if task == "binary":
         y, X, class_names = _build_binary_target(df, config)
     elif task == "application":
         y, X, class_names = _build_application_target(df, config)
-    else:  # fourclass
+    elif task == "fourclass":
         y, X, class_names = _build_fourclass_target(df, config)
+    elif task == "ids_binary":
+        y, X, class_names = _build_ids_binary_target(df, config)
+    elif task == "ids_family":
+        y, X, class_names = _build_ids_family_target(df, config)
+    else:  # ids_multi
+        y, X, class_names = _build_ids_multi_target(df, config)
     n_classes = len(class_names)
 
     # 3. Defensive cleaning (expect ~0 changes on this pre-cleaned dataset)
@@ -145,6 +325,15 @@ def load_and_prepare(config, task: str = None) -> dict:
     feature_names = X.columns.tolist()
     n_features = len(feature_names)
     print(f"Usable feature columns: {n_features}")
+
+    # 4b. Optional majority-only downsample (CIC-IDS2017 tasks only)
+    if task in IDS_TASKS and config.SUBSAMPLE_N is not None:
+        if task == "ids_binary":
+            majority_value = 0  # Benign
+        else:
+            majority_benign_name = "BENIGN" if task == "ids_family" else config.IDS_BENIGN_LABEL
+            majority_value = class_names.index(majority_benign_name)
+        X, y = _subsample_majority(X, y, majority_value, config.SUBSAMPLE_N, config.RANDOM_STATE)
 
     # 5. Stratified split: 64/16/20 train/val/test
     X_trainval, X_test, y_trainval, y_test = train_test_split(
@@ -189,12 +378,11 @@ def load_and_prepare(config, task: str = None) -> dict:
         "dropped_cols": dropped_cols,
     }
 
-    if task in ("application", "fourclass"):
+    if task in ("application", "fourclass", "ids_family", "ids_multi"):
         result["class_names"] = class_names
         with open(paths.CLASS_NAMES_JSON, "w") as f:
             json.dump(class_names, f)
-        label = "Application" if task == "application" else "Fourclass"
-        print(f"{label} class names ({len(class_names)}): {class_names}")
+        print(f"{task} class names ({len(class_names)}): {class_names}")
 
     return result
 

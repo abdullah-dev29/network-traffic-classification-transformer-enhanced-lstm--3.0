@@ -5,24 +5,30 @@ Runs second on Colab, after train.py (for the same --task). Loads the
 saved model, validation/test data, and training history -- it never
 re-trains.
 
-Binary task: sweeps validation-set thresholds to find the F1-maximizing
-operating point (config.TUNE_THRESHOLD), then reports test-set metrics at
-both the default 0.5 threshold and the tuned threshold. This is how the
-model's higher AUC gets cashed in as a better, balanced operating point
-instead of being hidden behind a blind 0.5 cutoff.
+Binary tasks ("binary", "ids_binary"): sweeps validation-set thresholds to
+find the F1-maximizing operating point (config.TUNE_THRESHOLD), then
+reports test-set metrics at both the default 0.5 threshold and the tuned
+threshold. This is how the model's higher AUC gets cashed in as a better,
+balanced operating point instead of being hidden behind a blind 0.5 cutoff.
 
-Application task: reports accuracy, macro/weighted F1, macro precision/
-recall, and macro one-vs-rest AUC, plus a per-class report and an 8x8
-confusion matrix. Macro-F1 and the confusion matrix are the headline
-metrics here given the ~10x class imbalance, not raw accuracy.
+Multiclass tasks ("application", "ids_family", "ids_multi"): reports
+accuracy, macro/weighted F1, macro precision/recall, and macro one-vs-rest
+AUC, plus a per-class report and a KxK confusion matrix (evaluate_multiclass,
+shared across all three -- the metric logic doesn't depend on which dataset
+or how many classes). Macro-F1 and the confusion matrix are the headline
+metrics here given the heavy class imbalance in all three, not raw accuracy.
 
 Fourclass task: trains one 4-class (Tor/VPN/Non-Tor/NonVPN) softmax
 classifier, then reports TWO levels -- Level 2 is the 4-class result
-(same kind of macro metrics as application), Level 1 is the binary
+(same kind of macro metrics as evaluate_multiclass), Level 1 is the binary
 Darknet-vs-Benign view obtained by grouping the 4-class prediction (and
 summing the Tor+VPN probability mass for AUC). Tor is ~1.1% of rows
 (~55x imbalance), so it is expected to be the weak class -- macro-F1 and
 the confusion matrix are the headline Level-2 metrics, not raw accuracy.
+ids_family/ids_multi do NOT get this two-level treatment -- they are
+reported as flat multiclass tasks (evaluate_multiclass), since (unlike
+fourclass vs binary) they are not a finer-grained version of ids_binary
+sharing the same model.
 """
 
 import argparse
@@ -57,7 +63,12 @@ import config
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate the Transformer-Enhanced LSTM.")
     parser.add_argument(
-        "--task", choices=["binary", "application", "fourclass"], default=config.TASK,
+        "--task",
+        choices=[
+            "binary", "application", "fourclass",
+            "ids_binary", "ids_family", "ids_multi",
+        ],
+        default=config.TASK,
         help="Which classification task to evaluate (default: config.TASK).",
     )
     return parser.parse_args()
@@ -99,7 +110,14 @@ def _plot_curves(history, paths, model_name):
     plt.close()
 
 
-def evaluate_binary(model, data, history, paths):
+def evaluate_binary(model, data, history, paths, task="binary", class_names=None):
+    """Shared binary evaluation path for "binary" and "ids_binary".
+
+    `class_names` defaults to config.CLASS_NAMES (the darknet Benign/Darknet
+    pair) for backward compatibility; pass config.IDS_BINARY_CLASS_NAMES
+    (Benign/Attack) for "ids_binary".
+    """
+    class_names = class_names if class_names is not None else config.CLASS_NAMES
     X_val, y_val = data["X_val"], data["y_val"]
     X_test, y_test = data["X_test"], data["y_test"]
 
@@ -133,7 +151,7 @@ def evaluate_binary(model, data, history, paths):
     # --- metrics.json ---
     metrics = {
         "model_name": config.MODEL_NAME,
-        "task": "binary",
+        "task": task,
         "threshold_0_5": metrics_05,
         "best_threshold": best_threshold,
         "threshold_tuned": metrics_best,
@@ -159,7 +177,7 @@ def evaluate_binary(model, data, history, paths):
         f.write(_row(f"{config.MODEL_NAME} (thr=best={best_threshold:.2f})", metrics_best) + "\n")
 
     # --- classification report (at the tuned threshold, the recommended operating point) ---
-    report = classification_report(y_test, y_pred_best, target_names=config.CLASS_NAMES)
+    report = classification_report(y_test, y_pred_best, target_names=class_names)
     with open(paths.CLF_REPORT_TXT, "w") as f:
         f.write(f"Classification report at tuned threshold ({best_threshold:.2f})\n\n")
         f.write(report)
@@ -169,7 +187,7 @@ def evaluate_binary(model, data, history, paths):
     plt.figure(figsize=(6, 5))
     sns.heatmap(
         cm, annot=True, fmt="d", cmap="Blues",
-        xticklabels=config.CLASS_NAMES, yticklabels=config.CLASS_NAMES,
+        xticklabels=class_names, yticklabels=class_names,
     )
     plt.xlabel("Predicted")
     plt.ylabel("True")
@@ -194,7 +212,10 @@ def evaluate_binary(model, data, history, paths):
     _plot_curves(history, paths, config.MODEL_NAME)
 
 
-def evaluate_application(model, data, history, paths):
+def evaluate_multiclass(model, data, history, paths, task):
+    """Generic flat multiclass evaluation, shared by "application", "ids_family",
+    and "ids_multi" -- the metric logic doesn't depend on the dataset or n_classes.
+    """
     X_test, y_test = data["X_test"], data["y_test"]
     class_names = data["class_names"]
 
@@ -218,7 +239,7 @@ def evaluate_application(model, data, history, paths):
     # --- metrics.json ---
     metrics = {
         "model_name": config.MODEL_NAME,
-        "task": "application",
+        "task": task,
         "accuracy": accuracy,
         "macro_f1": macro_f1,
         "weighted_f1": weighted_f1,
@@ -236,7 +257,7 @@ def evaluate_application(model, data, history, paths):
 
     # --- metrics.txt (readable summary + per-class report) ---
     with open(paths.METRICS_TXT, "w") as f:
-        f.write(f"{config.MODEL_NAME} -- application-type classification (8 classes)\n\n")
+        f.write(f"{config.MODEL_NAME} -- {task} classification ({len(class_names)} classes)\n\n")
         f.write(f"Accuracy:        {accuracy:.4f}\n")
         f.write(f"Macro F1:        {macro_f1:.4f}\n")
         f.write(f"Weighted F1:     {weighted_f1:.4f}\n")
@@ -251,20 +272,20 @@ def evaluate_application(model, data, history, paths):
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
     plt.xlabel("Predicted")
     plt.ylabel("True")
-    plt.title(f"Confusion Matrix -- {config.MODEL_NAME} (application)")
+    plt.title(f"Confusion Matrix -- {config.MODEL_NAME} ({task})")
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
     plt.savefig(paths.CONFUSION_PNG, dpi=150)
     plt.close()
 
-    # --- row-normalized version so small classes (VOIP, Email) are readable ---
+    # --- row-normalized version so small/rare classes are readable ---
     cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
     norm_png = paths.CONFUSION_PNG.replace(".png", "_normalized.png")
     plt.figure(figsize=(9, 7))
     sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
     plt.xlabel("Predicted")
     plt.ylabel("True")
-    plt.title(f"Confusion Matrix (row-normalized) -- {config.MODEL_NAME} (application)")
+    plt.title(f"Confusion Matrix (row-normalized) -- {config.MODEL_NAME} ({task})")
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
     plt.savefig(norm_png, dpi=150)
@@ -412,15 +433,17 @@ def main():
         history = json.load(f)
 
     if task == "binary":
-        evaluate_binary(model, data, history, paths)
-    elif task == "application":
-        with open(paths.CLASS_NAMES_JSON, "r") as f:
-            data["class_names"] = json.load(f)
-        evaluate_application(model, data, history, paths)
-    else:  # fourclass
+        evaluate_binary(model, data, history, paths, task=task, class_names=config.CLASS_NAMES)
+    elif task == "ids_binary":
+        evaluate_binary(model, data, history, paths, task=task, class_names=config.IDS_BINARY_CLASS_NAMES)
+    elif task == "fourclass":
         with open(paths.CLASS_NAMES_JSON, "r") as f:
             data["class_names"] = json.load(f)
         evaluate_fourclass(model, data, history, paths)
+    else:  # application, ids_family, ids_multi -- all share the generic multiclass path
+        with open(paths.CLASS_NAMES_JSON, "r") as f:
+            data["class_names"] = json.load(f)
+        evaluate_multiclass(model, data, history, paths, task=task)
 
 
 if __name__ == "__main__":

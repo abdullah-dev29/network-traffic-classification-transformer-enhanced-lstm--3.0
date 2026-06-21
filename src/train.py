@@ -58,7 +58,12 @@ def set_seeds(seed: int) -> None:
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the Transformer-Enhanced LSTM.")
     parser.add_argument(
-        "--task", choices=["binary", "application", "fourclass"], default=config.TASK,
+        "--task",
+        choices=[
+            "binary", "application", "fourclass",
+            "ids_binary", "ids_family", "ids_multi",
+        ],
+        default=config.TASK,
         help="Which classification task to train (default: config.TASK).",
     )
     return parser.parse_args()

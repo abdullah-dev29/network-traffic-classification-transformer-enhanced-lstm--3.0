@@ -174,11 +174,12 @@ FAMILY_DEFAULT = "Other"
 # ids_multi (fine) task -- ASCII-only, sidesteps the corrupted-dash strings.
 WEBATTACK_MERGED_NAME = "Web Attack"
 
-# Optional stratified majority-only downsample for faster Colab runs on this
-# ~2.2M-row (post-cleaning) dataset: every minority-class row is kept, only
-# the majority (benign) rows are downsampled to hit this total. None = use
-# all rows. If Colab training is slow, try 400_000-600_000.
-SUBSAMPLE_N = None
+# Stratified subsample for faster Colab runs on this ~2.2M-row
+# (post-cleaning) dataset: a fraction of rows is kept, stratified on the raw
+# fine `Label` column, applied after cleaning and before the train/val/test
+# split (see preprocessing._stratified_subsample()). 1.0 or None = use all
+# rows. Default 0.25 keeps ~557,884 of ~2,231,536 rows (~4x faster).
+SUBSAMPLE_FRAC = 0.25
 
 # --------------------------------------------------------------------------
 # Split / reproducibility — IDENTICAL to Phase 1 (do not change)

@@ -27,9 +27,13 @@ _load_ids2017()):
 
 All six tasks share identical cleaning / constant-column-drop / scaling /
 reshape / split mechanics -- they only differ in how the target `y` (and
-which label columns get dropped from `X`) is constructed. The CIC-IDS2017
-tasks additionally support an optional stratified majority-only downsample
-(config.SUBSAMPLE_N) applied after cleaning, before the split.
+which label columns get dropped from `X`) is constructed. For the
+CIC-IDS2017 tasks, an optional stratified subsample (config.SUBSAMPLE_FRAC)
+is applied right after cleaning and before the per-task target is built --
+stratified on the raw fine `Label` column so ids_binary/ids_family/
+ids_multi all draw the exact same rows, and so ids_multi's web-variant
+merge + MIN_CLASS_COUNT rare-class fold (see _build_ids_multi_target())
+runs on the subsampled counts rather than the full pre-subsample counts.
 
 Import-safe: nothing in this module trains a model. The __main__ demo at
 the bottom only loads data and prints summary stats (pandas / sklearn only).
@@ -224,32 +228,94 @@ def _build_ids_multi_target(df: pd.DataFrame, config):
     return y, X, class_names
 
 
-def _subsample_majority(X: pd.DataFrame, y: pd.Series, majority_value, n_target: int, random_state: int):
-    """Stratified-ish majority-only downsample: keep every minority row, downsample only `majority_value`."""
-    total = len(X)
-    if n_target is None or total <= n_target:
-        return X, y
+def _clean_features(X: pd.DataFrame, config):
+    """Defensive cleaning shared by every task: inf -> NaN, drop NaN rows,
+    drop duplicate rows, drop constant columns. Returns the cleaned X and
+    the dropped constant-column names; the caller re-aligns any parallel
+    Series (y, or a raw label column) to X.index afterwards.
+    """
+    n_before = len(X)
+    X = X.replace([np.inf, -np.inf], np.nan)
+    inf_replaced = int(X.isna().sum().sum())
+    print(f"Replaced inf/-inf with NaN in {inf_replaced} cells")
 
-    minority_mask = y != majority_value
-    n_minority = int(minority_mask.sum())
-    n_majority_keep = n_target - n_minority
-    if n_majority_keep <= 0:
-        print(
-            f"WARNING: SUBSAMPLE_N={n_target} is smaller than the minority-row count "
-            f"({n_minority}); keeping all rows, no downsampling applied"
-        )
-        return X, y
+    nan_mask = X.isna().any(axis=1)
+    n_nan_rows = int(nan_mask.sum())
+    X = X.loc[~nan_mask]
+    print(f"Dropped {n_nan_rows} rows containing NaN")
 
-    majority_idx = y.index[~minority_mask]
-    rng = np.random.RandomState(random_state)
-    keep_majority_idx = rng.choice(majority_idx.to_numpy(), size=n_majority_keep, replace=False)
-    keep_idx = np.concatenate([y.index[minority_mask].to_numpy(), keep_majority_idx])
+    dup_mask = X.duplicated()
+    n_dup_rows = int(dup_mask.sum())
+    X = X.loc[~dup_mask]
+    print(f"Dropped {n_dup_rows} duplicate rows")
+    print(f"Rows: {n_before} -> {len(X)}")
 
-    print(
-        f"SUBSAMPLE_N={n_target}: kept {n_majority_keep} of {len(majority_idx)} majority rows, "
-        f"all {n_minority} minority rows -> new total {len(keep_idx)}"
+    dropped_cols = []
+    if config.DROP_CONSTANT_COLS:
+        dropped_cols = [c for c in X.columns if X[c].nunique() <= 1]
+        X = X.drop(columns=dropped_cols)
+        print(f"Dropped {len(dropped_cols)} constant columns: {dropped_cols}")
+
+    return X, dropped_cols
+
+
+def _safe_counts(s: pd.Series) -> dict:
+    """value_counts() as a dict with console-safe keys. The raw CIC-IDS2017
+    `Label` column carries a corrupted U+FFFD byte in the three "Web Attack"
+    variants (a pre-existing upstream artifact, see config.py) which crashes
+    printing on non-UTF-8 consoles -- escape non-ASCII bytes for display only.
+    """
+    return {
+        str(k).encode("ascii", "backslashreplace").decode("ascii"): int(v)
+        for k, v in s.value_counts().items()
+    }
+
+
+def _stratified_subsample(X: pd.DataFrame, label: pd.Series, config):
+    """Stratified subsample of (X, label) down to config.SUBSAMPLE_FRAC of
+    the rows, stratified on the raw fine CIC-IDS2017 label so ids_binary /
+    ids_family / ids_multi all draw the exact same rows (this runs before
+    any task-specific target is built, on the common cleaned feature set).
+
+    A class so rare that round(count * frac) < 2 is kept in full rather
+    than sampled, since a stratified split needs >= 2 members per class.
+    """
+    frac = config.SUBSAMPLE_FRAC
+    if frac is None or frac >= 1.0:
+        return X, label
+
+    n_before = len(X)
+    counts = label.value_counts()
+    guard_classes = [c for c, n in counts.items() if round(n * frac) < 2]
+
+    if guard_classes:
+        guard_counts = {
+            str(c).encode("ascii", "backslashreplace").decode("ascii"): int(counts[c])
+            for c in guard_classes
+        }
+        print(f"SUBSAMPLE_FRAC={frac}: classes too rare to subsample, kept in full: {guard_counts}")
+        guard_mask = label.isin(guard_classes)
+        X_guard, label_guard = X.loc[guard_mask], label.loc[guard_mask]
+        X_rest, label_rest = X.loc[~guard_mask], label.loc[~guard_mask]
+    else:
+        X_guard, label_guard = None, None
+        X_rest, label_rest = X, label
+
+    X_sample, _, label_sample, _ = train_test_split(
+        X_rest, label_rest,
+        train_size=frac,
+        stratify=label_rest,
+        random_state=config.RANDOM_STATE,
     )
-    return X.loc[keep_idx], y.loc[keep_idx]
+
+    if X_guard is not None:
+        X_sample = pd.concat([X_sample, X_guard])
+        label_sample = pd.concat([label_sample, label_guard])
+
+    print(f"Subsampled {n_before} -> {len(X_sample)} rows (stratified, frac={frac})")
+    print("Class distribution after subsampling:", _safe_counts(label_sample))
+
+    return X_sample, label_sample
 
 
 def load_and_prepare(config, task: str = None) -> dict:
@@ -281,59 +347,52 @@ def load_and_prepare(config, task: str = None) -> dict:
     else:
         df = pd.read_parquet(config.DATA_PATH)
 
-    # 2. Build target + drop label columns from X (task-specific)
-    if task == "binary":
-        y, X, class_names = _build_binary_target(df, config)
-    elif task == "application":
-        y, X, class_names = _build_application_target(df, config)
-    elif task == "fourclass":
-        y, X, class_names = _build_fourclass_target(df, config)
-    elif task == "ids_binary":
-        y, X, class_names = _build_ids_binary_target(df, config)
-    elif task == "ids_family":
-        y, X, class_names = _build_ids_family_target(df, config)
-    else:  # ids_multi
-        y, X, class_names = _build_ids_multi_target(df, config)
-    n_classes = len(class_names)
+    if task in IDS_TASKS:
+        # 2. Clean + (optionally) subsample the common feature matrix BEFORE
+        # building the per-task target. All three IDS tasks share the same
+        # raw `Label` column and the same cleaned X at this point, so the
+        # stratified subsample draws identical rows for ids_binary/
+        # ids_family/ids_multi; ids_multi's web-variant merge + rare-class
+        # fold (below) then runs on the already-subsampled counts.
+        raw_label = df[config.IDS_LABEL_COL].astype(str).str.strip()
+        X = df.drop(columns=[c for c in [config.IDS_LABEL_COL] + config.IDS_DROP_COLS if c in df.columns])
 
-    # 3. Defensive cleaning (expect ~0 changes on this pre-cleaned dataset)
-    n_before = len(X)
-    X = X.replace([np.inf, -np.inf], np.nan)
-    inf_replaced = int(X.isna().sum().sum())
-    print(f"Replaced inf/-inf with NaN in {inf_replaced} cells")
+        X, dropped_cols = _clean_features(X, config)
+        raw_label = raw_label.loc[X.index]
 
-    nan_mask = X.isna().any(axis=1)
-    n_nan_rows = int(nan_mask.sum())
-    X = X.loc[~nan_mask]
-    y = y.loc[X.index]
-    print(f"Dropped {n_nan_rows} rows containing NaN")
+        X, raw_label = _stratified_subsample(X, raw_label, config)
 
-    dup_mask = X.duplicated()
-    n_dup_rows = int(dup_mask.sum())
-    X = X.loc[~dup_mask]
-    y = y.loc[X.index]
-    print(f"Dropped {n_dup_rows} duplicate rows")
-    print(f"Rows: {n_before} -> {len(X)}")
+        feature_names = X.columns.tolist()
+        n_features = len(feature_names)
+        print(f"Usable feature columns: {n_features}")
 
-    # 4. Drop constant (zero-variance) columns
-    dropped_cols = []
-    if config.DROP_CONSTANT_COLS:
-        dropped_cols = [c for c in X.columns if X[c].nunique() <= 1]
-        X = X.drop(columns=dropped_cols)
-        print(f"Dropped {len(dropped_cols)} constant columns: {dropped_cols}")
-
-    feature_names = X.columns.tolist()
-    n_features = len(feature_names)
-    print(f"Usable feature columns: {n_features}")
-
-    # 4b. Optional majority-only downsample (CIC-IDS2017 tasks only)
-    if task in IDS_TASKS and config.SUBSAMPLE_N is not None:
+        # 3. Build the per-task target on the cleaned + subsampled rows.
+        df = X.copy()
+        df[config.IDS_LABEL_COL] = raw_label
         if task == "ids_binary":
-            majority_value = 0  # Benign
-        else:
-            majority_benign_name = "BENIGN" if task == "ids_family" else config.IDS_BENIGN_LABEL
-            majority_value = class_names.index(majority_benign_name)
-        X, y = _subsample_majority(X, y, majority_value, config.SUBSAMPLE_N, config.RANDOM_STATE)
+            y, X, class_names = _build_ids_binary_target(df, config)
+        elif task == "ids_family":
+            y, X, class_names = _build_ids_family_target(df, config)
+        else:  # ids_multi
+            y, X, class_names = _build_ids_multi_target(df, config)
+        n_classes = len(class_names)
+    else:
+        # 2. Build target + drop label columns from X (task-specific)
+        if task == "binary":
+            y, X, class_names = _build_binary_target(df, config)
+        elif task == "application":
+            y, X, class_names = _build_application_target(df, config)
+        else:  # fourclass
+            y, X, class_names = _build_fourclass_target(df, config)
+        n_classes = len(class_names)
+
+        # 3. Defensive cleaning (expect ~0 changes on this pre-cleaned dataset)
+        X, dropped_cols = _clean_features(X, config)
+        y = y.loc[X.index]
+
+        feature_names = X.columns.tolist()
+        n_features = len(feature_names)
+        print(f"Usable feature columns: {n_features}")
 
     # 5. Stratified split: 64/16/20 train/val/test
     X_trainval, X_test, y_trainval, y_test = train_test_split(

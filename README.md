@@ -100,6 +100,9 @@ The model supports **six tasks** total, selected with `--task`:
   constant columns.
 - The 8 parquet files (~265 MB total) are committed to this repo so Colab
   can pull them via `git clone` -- no separate download step required.
+- CIC-IDS2017 experiments are run on a stratified 25% subset (~557,884 rows,
+  `SUBSAMPLE_FRAC=0.25`, seed 42) for tractable GPU training; set
+  `SUBSAMPLE_FRAC=1.0` to use the full dataset.
 
 ## Tasks (CIC-IDS2017)
 

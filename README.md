@@ -19,8 +19,9 @@ The model supports **six tasks** total, selected with `--task`:
 **CIC-IDS2017 (Phase 3, current):**
 - **`ids_binary`** -- Benign vs any attack, from `Label`. The one task that
   is genuinely class-comparable to the CIC-Darknet2020 `binary` result.
-- **`ids_family`** -- coarse attack families (BENIGN + 7 buckets: DoS/DDoS,
-  Brute-Force, Web-Attack, Botnet, PortScan, Infiltration, Other).
+- **`ids_family`** -- coarse attack families (BENIGN + 5 buckets: DoS/DDoS,
+  Brute-Force, Web-Attack, Botnet, PortScan; Infiltration/Other dropped as
+  too rare to stratify -- see below).
 - **`ids_multi`** -- fine attack types (11 classes after merging the three
   Web Attack variants and dropping two ultra-rare classes).
 
@@ -135,6 +136,16 @@ Each fine label is mapped to one of 8 buckets
 | Infiltration | 36 | Infiltration |
 | Other | 11 | Heartbleed (too rare -- 11 rows -- to stratify as its own family) |
 
+**Rare-family rule** (`config.MIN_CLASS_COUNT = 100`, same threshold `ids_multi`
+uses below): a family with fewer rows than this can't be reliably stratified
+across the 64/16/20 split and blows `"balanced"` class weights up into the
+thousands, so it's folded into `Other` -- the bucket that already exists for
+exactly this "too rare to stand alone" case. In this dataset, `Infiltration`
+(36 rows) folds into `Other`, and the combined `Other` (47 rows) is still
+below the threshold, so those rows are dropped outright. Final `ids_family`
+classes: `BENIGN`, `DoS/DDoS`, `Brute-Force`, `Web-Attack`, `PortScan`,
+`Botnet` (6 classes, down from 8).
+
 ### `ids_multi` -- fine attack types
 
 The full fine-grained label set, with two cleanups before `LabelEncoder`:
@@ -170,8 +181,18 @@ The dataset is highly imbalanced (Benign dominates `ids_family`/
 `ids_multi`), and several rare attack classes were merged or dropped as
 described above -- judge `ids_family`/`ids_multi` by **macro-F1** and the
 confusion matrix, not raw accuracy. Expect the rarest surviving classes
-(e.g. `Botnet`/`Bot`, `Infiltration`) to be the weak spots even after this
-handling -- that's an honest, expected finding, not a bug.
+(e.g. `Botnet`/`Bot`) to be the weak spots even after this handling --
+that's an honest, expected finding, not a bug.
+
+**`ids_family`/`ids_multi` class weighting:** both tasks train with
+`class_weight=None` by default (`IDS_FAMILY_USE_CLASS_WEIGHT` /
+`IDS_MULTI_USE_CLASS_WEIGHT = False`) -- raw inverse-frequency `"balanced"`
+weighting reaches into the thousands on this dataset's near-singleton
+classes and either collapses training to a constant output or shoves the
+decision boundary so hard toward rare classes that Benign gets crushed.
+`config.IDS_CLASS_WEIGHT_CAP` (default 10) caps `"balanced"` weights at a
+gentler value if you flip the flags back on to experiment; `application`/
+`fourclass` are unaffected and keep raw `"balanced"` weighting.
 
 If `config.SUBSAMPLE_N` is set for a given run, the reported numbers are on
 a stratified majority-only-downsampled subsample (every minority/attack row
@@ -223,8 +244,12 @@ continuous tabular features), and the LSTM is a standard Keras `LSTM` layer.
   `BinaryFocalCrossentropy`, an alternative imbalance lever.
 - `CLASS_WEIGHT_BY_TASK` -- per-task class-weight toggle: both binary tasks
   default to `False` (no class weight, threshold tuning instead);
-  `application`/`fourclass`/`ids_family`/`ids_multi` default to `True`
-  (`sklearn.compute_class_weight("balanced", ...)` in `train.py`).
+  `application`/`fourclass` default to `True` (raw
+  `sklearn.compute_class_weight("balanced", ...)` in `train.py`);
+  `ids_family`/`ids_multi` default to `False` (raw `"balanced"` destabilizes
+  training on this dataset's near-singleton classes -- see the
+  "`ids_family`/`ids_multi` class weighting" note above; `IDS_CLASS_WEIGHT_CAP`
+  caps `"balanced"` weights if re-enabled).
 
 ## Comparison integrity with Phase 1 (CIC-Darknet2020 `binary` only)
 
@@ -362,16 +387,17 @@ CIC-IDS2017 attacks tend to be fairly separable, so expect strong numbers
 here -- this is the one result that's genuinely on the same page as the
 CIC-Darknet2020 `binary` task. Report F1 and AUC as the headline numbers.
 
-**`ids_family` (coarse attack families, 8 classes)** -- judge by macro-F1
+**`ids_family` (coarse attack families, 6 classes)** -- judge by macro-F1
 and the confusion matrix, not raw accuracy:
 
 | Model                      | Accuracy | Macro F1 | Weighted F1 | Macro Precision | Macro Recall | Macro AUC |
 |-----------------------------|----------|----------|-------------|------------------|--------------|-----------|
 | Transformer-Enhanced LSTM  | TBD      | TBD      | TBD         | TBD              | TBD          | TBD       |
 
-Expect the rarest families (`Infiltration`, `Other`/Heartbleed) to be the
-weak spots -- that's an honest, expected finding given 36 and 11 rows
-respectively, not a regression.
+`Infiltration` and `Other`/Heartbleed are dropped before training (36 and 11
+rows respectively, too rare to stratify -- see the rare-family rule above),
+so expect `Botnet`/`Bot` (the next-rarest surviving family) to be the weak
+spot, not a regression.
 
 **`ids_multi` (fine attack types, 11 classes)** -- judge by macro-F1 and the
 confusion matrix, not raw accuracy:

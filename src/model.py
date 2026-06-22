@@ -171,6 +171,6 @@ if __name__ == "__main__":
     print("\n=== ids_binary head (CIC-IDS2017, 69 features) ===")
     build_transformer_lstm(n_features=69, n_classes=2, task="ids_binary").summary()
     print("\n=== ids_family head (CIC-IDS2017, 69 features) ===")
-    build_transformer_lstm(n_features=69, n_classes=8, task="ids_family").summary()
+    build_transformer_lstm(n_features=69, n_classes=6, task="ids_family").summary()
     print("\n=== ids_multi head (CIC-IDS2017, 69 features) ===")
     build_transformer_lstm(n_features=69, n_classes=11, task="ids_multi").summary()

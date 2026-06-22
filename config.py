@@ -221,11 +221,24 @@ FOURCLASS_USE_CLASS_WEIGHT = True
 # the two binary tasks are handled identically.
 IDS_BINARY_USE_CLASS_WEIGHT = False
 
-# ids_family / ids_multi: heavy imbalance (Benign dominates; Infiltration/
-# Heartbleed-derived buckets are tiny) -- class weights are a reasonable
-# default here, same reasoning as application/fourclass above.
-IDS_FAMILY_USE_CLASS_WEIGHT = True
-IDS_MULTI_USE_CLASS_WEIGHT = True
+# ids_family / ids_multi: raw inverse-frequency "balanced" weighting blows
+# up to 4-digit weights on the 1-2 sample classes that survive into
+# training (e.g. Infiltration/Other in ids_family) -- this destabilizes/
+# collapses training (ids_family: constant-output collapse, AUC=0.5) or
+# shoves the decision boundary so hard toward rare classes that the
+# majority class is crushed (ids_multi: Benign recall 0.04). Default is
+# now no class weights at all for these two tasks; the model already has
+# real signal without them. See README's "ids_family/ids_multi class
+# weighting" note.
+IDS_FAMILY_USE_CLASS_WEIGHT = False
+IDS_MULTI_USE_CLASS_WEIGHT = False
+
+# Only consulted for ids_family/ids_multi, and only if one of the two flags
+# above is flipped back to True to experiment with weighting again -- caps
+# the raw "balanced" weights at this value (a gentler alternative to raw
+# inverse-frequency on extreme imbalance). None = no cap. Does not affect
+# application/fourclass, which keep raw "balanced" weighting unchanged.
+IDS_CLASS_WEIGHT_CAP = 10.0
 
 # Single lookup train.py reads to resolve the active task's class-weight
 # setting, instead of an if/elif chain. Each task still comes from its own

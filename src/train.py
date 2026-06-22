@@ -107,6 +107,12 @@ def main():
         weights = compute_class_weight(
             "balanced", classes=np.unique(data["y_train"]), y=data["y_train"]
         )
+        # ids_family/ids_multi only: raw "balanced" weights reach into the
+        # thousands on this dataset's 1-2 sample classes and destabilize
+        # training (see config.IDS_CLASS_WEIGHT_CAP). application/fourclass
+        # are untouched -- they keep raw "balanced" weighting.
+        if task in ("ids_family", "ids_multi") and config.IDS_CLASS_WEIGHT_CAP is not None:
+            weights = np.minimum(weights, config.IDS_CLASS_WEIGHT_CAP)
         class_weight = dict(enumerate(weights))
         print("Using class weights:", class_weight)
 

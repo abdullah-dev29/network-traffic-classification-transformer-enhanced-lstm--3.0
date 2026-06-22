@@ -156,7 +156,18 @@ def _build_ids_binary_target(df: pd.DataFrame, config):
 
 
 def _build_ids_family_target(df: pd.DataFrame, config):
-    """Coarse attack-family classification from `Label` via _map_family()."""
+    """Coarse attack-family classification from `Label` via _map_family().
+
+    Mirrors _build_ids_multi_target()'s rare-class rule at the family
+    granularity: a family below config.MIN_CLASS_COUNT can't be reliably
+    stratified across the 64/16/20 split (a 1-2 sample class can land with
+    0 rows in a split) and blows "balanced" class weights up into the
+    thousands. Such families are folded into "Other" -- the bucket that
+    already exists for exactly this "too rare to stand alone" case
+    (Heartbleed) -- and if "Other" is itself still below the threshold
+    after folding, those rows are dropped outright (there's no coarser
+    bucket left to fold into).
+    """
     label = df[config.IDS_LABEL_COL].astype(str).str.strip()
     families = label.map(lambda v: _map_family(v, config))
 
@@ -170,7 +181,30 @@ def _build_ids_family_target(df: pd.DataFrame, config):
         bad = sorted(label[unexpected].unique().tolist())
         print(f"WARNING: {int(unexpected.sum())} rows fell into '{config.FAMILY_DEFAULT}' via unmapped labels: {bad}")
 
-    print("ids_family bucket counts:", families.value_counts().to_dict())
+    print("ids_family bucket counts (before rare-family handling):", families.value_counts().to_dict())
+
+    counts = families.value_counts()
+    rare = [
+        c for c in counts.index
+        if c != config.FAMILY_DEFAULT and counts[c] < config.MIN_CLASS_COUNT
+    ]
+    if rare:
+        folded = {c: int(counts[c]) for c in rare}
+        print(f"ids_family: rare families (< {config.MIN_CLASS_COUNT} rows) folded into '{config.FAMILY_DEFAULT}': {folded}")
+        families = families.where(~families.isin(rare), config.FAMILY_DEFAULT)
+
+    counts = families.value_counts()
+    other_count = int(counts.get(config.FAMILY_DEFAULT, 0))
+    if other_count and other_count < config.MIN_CLASS_COUNT:
+        print(
+            f"ids_family: '{config.FAMILY_DEFAULT}' still only {other_count} rows after folding -- "
+            f"dropping them (no coarser bucket to fold into)"
+        )
+        keep_mask = families != config.FAMILY_DEFAULT
+        df = df.loc[keep_mask]
+        families = families.loc[keep_mask]
+
+    print("ids_family bucket counts (final):", families.value_counts().to_dict())
 
     encoder = LabelEncoder()
     y = pd.Series(encoder.fit_transform(families), index=families.index)

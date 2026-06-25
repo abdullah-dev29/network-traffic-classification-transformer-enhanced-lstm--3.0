@@ -380,8 +380,8 @@ tuned threshold is the recommended operating point:
 
 | Model                                 | Accuracy | F1  | Recall | Precision | AUC | Specificity |
 |----------------------------------------|----------|-----|--------|-----------|-----|-------------|
-| Transformer-Enhanced LSTM (thr=0.50)  | TBD      | TBD | TBD    | TBD       | TBD | TBD         |
-| Transformer-Enhanced LSTM (thr=best)  | TBD      | TBD | TBD    | TBD       | TBD | TBD         |
+| Transformer-Enhanced LSTM (thr=0.50)  | 0.9934      | 0.9779 | 0.9740    | 0.9818       | 0.9996 | 0.9968         |
+| Transformer-Enhanced LSTM (thr=best)  | 0.9931      | 0.9771 | 0.9774    | 0.9768       | 0.9996 | 0.9959         |
 
 CIC-IDS2017 attacks tend to be fairly separable, so expect strong numbers
 here -- this is the one result that's genuinely on the same page as the
@@ -392,7 +392,7 @@ and the confusion matrix, not raw accuracy:
 
 | Model                      | Accuracy | Macro F1 | Weighted F1 | Macro Precision | Macro Recall | Macro AUC |
 |-----------------------------|----------|----------|-------------|------------------|--------------|-----------|
-| Transformer-Enhanced LSTM  | TBD      | TBD      | TBD         | TBD              | TBD          | TBD       |
+| Transformer-Enhanced LSTM  | 0.9937      | 0.7623      | 0.9932         | 0.9221              | 0.7293          | 0.9989       |
 
 `Infiltration` and `Other`/Heartbleed are dropped before training (36 and 11
 rows respectively, too rare to stratify -- see the rare-family rule above),
@@ -404,7 +404,7 @@ confusion matrix, not raw accuracy:
 
 | Model                      | Accuracy | Macro F1 | Weighted F1 | Macro Precision | Macro Recall | Macro AUC |
 |-----------------------------|----------|----------|-------------|------------------|--------------|-----------|
-| Transformer-Enhanced LSTM  | TBD      | TBD      | TBD         | TBD              | TBD          | TBD       |
+| Transformer-Enhanced LSTM  | 0.9934      | 0.8690      | 0.9930         | 0.9607              | 0.8504          | 0.9991       |
 
 `ids_family`/`ids_multi` are **not** comparable class-for-class to the
 CIC-Darknet2020 `fourclass`/`application` results -- different problem
@@ -414,7 +414,10 @@ numbers are interpreted correctly.
 
 ## Team members
 
-- TBD
+- Muhammad Borhan UD Din - 63206
+- Muhammad Mutahar - 63513
+- Abdullah - 62724
+- Ameer Hamza - 65260
 
 ## Academic integrity
 

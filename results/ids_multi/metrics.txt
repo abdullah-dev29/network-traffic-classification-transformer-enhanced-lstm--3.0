@@ -1,0 +1,26 @@
+Transformer-Enhanced LSTM -- ids_multi classification (11 classes)
+
+Accuracy:        0.9934
+Macro F1:        0.8690
+Weighted F1:     0.9930
+Macro Precision: 0.9607
+Macro Recall:    0.8504
+Macro AUC (OvR): 0.9991
+
+                  precision    recall  f1-score   support
+
+          Benign       1.00      1.00      1.00     94761
+             Bot       0.76      0.51      0.61        72
+            DDoS       1.00      0.99      0.99      6401
+   DoS GoldenEye       0.99      0.99      0.99       514
+        DoS Hulk       0.97      0.98      0.97      8640
+DoS Slowhttptest       0.91      0.97      0.94       261
+   DoS slowloris       0.98      0.98      0.98       269
+     FTP-Patator       1.00      0.98      0.99       297
+        PortScan       0.98      0.95      0.96        92
+     SSH-Patator       1.00      0.92      0.96       161
+      Web Attack       1.00      0.09      0.17       107
+
+        accuracy                           0.99    111575
+       macro avg       0.96      0.85      0.87    111575
+    weighted avg       0.99      0.99      0.99    111575

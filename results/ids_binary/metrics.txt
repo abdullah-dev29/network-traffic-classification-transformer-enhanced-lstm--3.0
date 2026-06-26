@@ -1,0 +1,3 @@
+Model                                       Accuracy        F1    Recall Precision       AUC Specificity
+Transformer-Enhanced LSTM (thr=0.50)          0.9934    0.9779    0.9740    0.9818    0.9996      0.9968
+Transformer-Enhanced LSTM (thr=best=0.42)     0.9931    0.9771    0.9774    0.9768    0.9996      0.9959
